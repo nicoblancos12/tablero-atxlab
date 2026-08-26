@@ -438,37 +438,15 @@ function renderGeneral() {
 }
 
 /**
- * Panel de atención de UN proyecto: riesgos abiertos, entregables del cliente
- * vencidos o por vencer, y los comentarios de la última semana.
+ * Panel de atención de UN proyecto. Cada bloque ocupa el ancho completo y
+ * reparte sus elementos en horizontal, para no empujar la vista hacia abajo.
+ * Un bloque sin contenido no se dibuja: el espacio vacío no informa nada.
  */
 function panelAtencion(p) {
   const hoy = hoyISO(), pronto = PlanATX.masDias(hoy, 7), desde = PlanATX.masDias(hoy, -7);
-
-  const riesgos = DB.comentario.filter((c) => c.proyecto === p.id && c.riesgo && !c.atendido)
-    .map((c) => {
-      const a = DB.actividad.find((x) => x.id === c.actividad);
-      return { donde: a ? a.nombre : 'Comentario general', texto: c.texto, autor: c.autor, fecha: c.fecha, cid: c.id };
-    }).sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
-
-  const entregables = reqsDe(p.id)
-    .filter((r) => r.estado !== 'recibido' && r.fecha && r.fecha <= pronto)
-    .sort((a, b) => (a.fecha < b.fecha ? -1 : 1))
-    .map((r) => ({ titulo: r.titulo, fecha: r.fecha, responsable: r.responsable, vencido: r.fecha < hoy }));
-
-  const recientes = DB.comentario
-    .filter((c) => c.proyecto === p.id && c.fecha >= desde && !(c.riesgo && !c.atendido))
-    .sort((a, b) => (a.fecha < b.fecha ? 1 : -1)).slice(0, 5)
-    .map((c) => {
-      const a = DB.actividad.find((x) => x.id === c.actividad);
-      return { donde: a ? a.nombre : 'General', texto: c.texto, autor: c.autor, fecha: c.fecha };
-    });
-
-  const col = (titulo, n, clase, cuerpo) =>
-    '<div class="pa-col"><h4 class="' + clase + '">' + titulo +
-    (n ? '<span class="pa-n">' + n + '</span>' : '') + '</h4>' + cuerpo + '</div>';
+  const m = metricas(p);
 
   // Actividades con problema: detenidas por el cliente o con fecha vencida
-  const m = metricas(p);
   const problema = [];
   m.detenidas.forEach((a) => {
     const r = bloqueosDe(a)[0];
@@ -476,46 +454,95 @@ function panelAtencion(p) {
   });
   m.atrasadas.forEach((a) => {
     if (problema.some((x) => x.a.id === a.id)) return;
-    problema.push({ a, tipo: 'atrasada', por: 'debió cerrar el ' + fechaCorta(a.fin) +
-                    ' · lleva ' + dias(a.fin, hoy) + ' días' });
+    problema.push({ a, tipo: 'atrasada', por: 'debió cerrar el ' + fechaCorta(a.fin) + ' · lleva ' + dias(a.fin, hoy) + ' días' });
   });
-  const listaProb = problema.length
-    ? problema.slice(0, 5).map((x) => '<div class="pa-item' + (x.tipo === 'detenida' ? ' alerta-item' : ' mal-item') +
-        '" onclick="formActividad(\'' + x.a.id + '\')">' +
-        '<div class="pa-tit">' + esc(x.a.nombre) +
-        '<span class="pa-tag ' + x.tipo + '">' + (x.tipo === 'detenida' ? 'Detenida' : 'Atrasada') + '</span></div>' +
-        '<div class="pa-pie">' + (x.a.dueno ? esc(x.a.dueno) + ' · ' : 'sin dueño · ') + esc(x.por) + '</div></div>').join('') +
-      (problema.length > 5 ? '<button class="link pa-mas" onclick="irTabFiltro(\'problema\')">Ver las ' +
-        problema.length + ' completas</button>' : '')
-    : '<p class="pa-vacio">Ninguna actividad detenida ni con fecha vencida.</p>';
 
-  const listaRiesgos = riesgos.length
-    ? riesgos.slice(0, 4).map((r) => '<div class="pa-item mal-item">' +
-        '<div class="pa-tit">' + esc(r.donde) + '</div>' +
-        '<div class="pa-txt">' + esc(r.texto) + '</div>' +
-        '<div class="pa-pie">' + esc(r.autor) + ' · ' + fechaCorta(r.fecha) +
-        ' · <button class="link" onclick="atenderRiesgo(\'' + r.cid + '\')">atendido</button></div></div>').join('')
-    : '<p class="pa-vacio">Sin riesgos marcados.</p>';
+  const riesgos = DB.comentario.filter((c) => c.proyecto === p.id && c.riesgo && !c.atendido)
+    .map((c) => {
+      const a = DB.actividad.find((x) => x.id === c.actividad);
+      return { aid: a ? a.id : null, donde: a ? a.nombre : 'Comentario general',
+               texto: c.texto, autor: c.autor, fecha: c.fecha, cid: c.id };
+    }).sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
 
-  const listaEnt = entregables.length
-    ? entregables.slice(0, 4).map((e) => '<div class="pa-item' + (e.vencido ? ' mal-item' : ' alerta-item') + '">' +
+  const entregables = reqsDe(p.id)
+    .filter((r) => r.estado !== 'recibido' && r.fecha && r.fecha <= pronto)
+    .sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
+
+  const recientes = DB.comentario
+    .filter((c) => c.proyecto === p.id && c.fecha >= desde && !(c.riesgo && !c.atendido))
+    .sort((a, b) => (a.fecha < b.fecha ? 1 : -1)).slice(0, 6)
+    .map((c) => {
+      const a = DB.actividad.find((x) => x.id === c.actividad);
+      return { aid: a ? a.id : null, donde: a ? a.nombre : 'General', texto: c.texto, autor: c.autor, fecha: c.fecha };
+    });
+
+  const fila = (titulo, n, clase, items, extra) => !items ? '' :
+    '<div class="pa-fila"><div class="pa-cab"><h4 class="' + clase + '">' + titulo +
+    '<span class="pa-n">' + n + '</span></h4>' + (extra || '') + '</div>' +
+    '<div class="pa-items">' + items + '</div></div>';
+
+  const fProblema = problema.length ? fila('Actividades con problema', problema.length, 'mal',
+    problema.slice(0, 4).map((x) => '<div class="pa-item' + (x.tipo === 'detenida' ? ' alerta-item' : ' mal-item') +
+      '" onclick="irActividad(\'' + x.a.id + '\')">' +
+      '<div class="pa-tit">' + esc(x.a.nombre) +
+      '<span class="pa-tag ' + x.tipo + '">' + (x.tipo === 'detenida' ? 'Detenida' : 'Atrasada') + '</span></div>' +
+      '<div class="pa-pie">' + (x.a.dueno ? esc(x.a.dueno) : 'sin dueño') + ' · ' + esc(x.por) + '</div></div>').join(''),
+    problema.length > 4 ? '<button class="link" onclick="irTabFiltro(\'problema\')">Ver las ' +
+      problema.length + ' completas</button>' : '') : '';
+
+  const fRiesgos = riesgos.length ? fila('Riesgos abiertos', riesgos.length, 'mal',
+    riesgos.slice(0, 4).map((r) => '<div class="pa-item mal-item"' +
+      (r.aid ? ' onclick="irActividad(\'' + r.aid + '\')"' : '') + '>' +
+      '<div class="pa-tit">' + esc(r.donde) + '</div>' +
+      '<div class="pa-txt">' + esc(r.texto) + '</div>' +
+      '<div class="pa-pie">' + esc(r.autor) + ' · ' + fechaCorta(r.fecha) +
+      ' · <button class="link" onclick="event.stopPropagation();atenderRiesgo(\'' + r.cid + '\')">atendido</button>' +
+      '</div></div>').join('')) : '';
+
+  const fEnt = entregables.length ? fila('Entregables del cliente', entregables.length, 'alerta',
+    entregables.slice(0, 4).map((e) => {
+      const venc = e.fecha < hoy;
+      return '<div class="pa-item' + (venc ? ' mal-item' : ' alerta-item') +
+        '" onclick="irRequisito(\'' + e.id + '\')">' +
         '<div class="pa-tit">' + esc(e.titulo) + '</div>' +
         '<div class="pa-pie">' + (e.responsable ? esc(e.responsable) + ' · ' : '') +
-        (e.vencido ? 'vencido hace ' + dias(e.fecha, hoy) + ' días' : 'vence ' + fechaCorta(e.fecha)) +
-        '</div></div>').join('')
-    : '<p class="pa-vacio">Nada por vencer esta semana.</p>';
+        (venc ? 'vencido hace ' + dias(e.fecha, hoy) + ' días' : 'vence ' + fechaCorta(e.fecha)) +
+        '</div></div>';
+    }).join(''),
+    entregables.length > 4 ? '<button class="link" onclick="irTab(\'requisitos\')">Ver todos</button>' : '') : '';
 
-  const listaCom = recientes.length
-    ? recientes.map((c) => '<div class="pa-item">' +
-        '<div class="pa-txt">' + esc(c.texto) + '</div>' +
-        '<div class="pa-pie">' + esc(c.donde) + ' · ' + esc(c.autor) + ' · ' + fechaCorta(c.fecha) + '</div></div>').join('')
-    : '<p class="pa-vacio">Sin comentarios recientes.</p>';
+  const fCom = recientes.length ? fila('Comentarios de la semana', recientes.length, '',
+    recientes.slice(0, 4).map((c) => '<div class="pa-item"' +
+      (c.aid ? ' onclick="irActividad(\'' + c.aid + '\')"' : '') + '>' +
+      '<div class="pa-txt">' + esc(c.texto) + '</div>' +
+      '<div class="pa-pie">' + esc(c.donde) + ' · ' + esc(c.autor) + ' · ' + fechaCorta(c.fecha) + '</div></div>').join('')) : '';
 
-  return '<div class="panel-atencion">' +
-    col('Actividades con problema', problema.length, 'mal', listaProb) +
-    col('Riesgos abiertos', riesgos.length, 'mal', listaRiesgos) +
-    col('Entregables del cliente', entregables.length, 'alerta', listaEnt) +
-    col('Comentarios de la semana', 0, '', listaCom) + '</div>';
+  const todo = fProblema + fRiesgos + fEnt + fCom;
+  return todo ? '<div class="panel-atencion">' + todo + '</div>' : '';
+}
+
+/** Lleva a la actividad dentro de la lista cronológica y la resalta. */
+function irActividad(id) {
+  vista.tab = 'actividades';
+  vista.filtro = 'todas';
+  render();
+  resaltar('act-' + id);
+}
+
+function irRequisito(id) {
+  vista.tab = 'requisitos';
+  render();
+  resaltar('req-' + id);
+}
+
+function resaltar(domId) {
+  setTimeout(() => {
+    const el = document.getElementById(domId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('resaltada');
+    setTimeout(() => el.classList.remove('resaltada'), 2600);
+  }, 60);
 }
 
 function renderProyecto() {
@@ -564,7 +591,13 @@ const FILTROS = {
   abiertas:  { etq: 'Sin cerrar', test: (a) => a.avance < 100 },
 };
 
-function irTabFiltro(f) { vista.tab = 'actividades'; vista.filtro = f; render(); }
+function irTabFiltro(f) {
+  vista.tab = 'actividades'; vista.filtro = f; render();
+  setTimeout(() => {
+    const el = document.getElementById('tabbody');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 60);
+}
 function ponerFiltro(f) { vista.filtro = f; render(); }
 
 function renderActividades(p) {
@@ -591,7 +624,8 @@ function renderActividades(p) {
         const det = estaDetenida(a), bloq = bloqueosDe(a), ries = riesgosDe(p.id, a.id);
         const nc = comsDe(p.id, a.id).length;
         const tarde = a.avance < 100 && a.fin && a.fin < hoy;
-        return '<div class="act' + (ries.length ? ' riesgo' : (det ? ' detenida' : (tarde ? ' atrasada' : ''))) + '">' +
+        return '<div class="act' + (ries.length ? ' riesgo' : (det ? ' detenida' : (tarde ? ' atrasada' : ''))) +
+          '" id="act-' + a.id + '">' +
           '<button class="palomear' + (a.avance === 100 ? ' on' : '') + '" onclick="ciclar(\'' + a.id + '\')">' +
           (a.avance === 100 ? '✓' : a.avance + '%') + '</button>' +
           '<div class="act-cuerpo"><div class="act-tit">' + esc(a.nombre) +
@@ -626,7 +660,8 @@ function renderRequisitos(p) {
       const bloq = actsDe(p.id).filter((a) => (r.bloquea || []).includes(a.id));
       const vencido = r.estado !== 'recibido' && r.fecha && r.fecha < hoy;
       const frenando = bloq.filter((a) => a.ini && a.ini <= hoy && a.avance < 100);
-      return '<div class="req' + (r.estado === 'recibido' ? ' ok' : (vencido ? ' mal' : '')) + '">' +
+      return '<div class="req' + (r.estado === 'recibido' ? ' ok' : (vencido ? ' mal' : '')) +
+        '" id="req-' + r.id + '">' +
         '<button class="palomear' + (r.estado === 'recibido' ? ' on' : '') + '" onclick="toggleReq(\'' + r.id + '\')">' +
         (r.estado === 'recibido' ? '✓' : '') + '</button>' +
         '<div class="act-cuerpo"><div class="act-tit">' + esc(r.titulo) + '</div>' +
@@ -972,12 +1007,12 @@ function formPersona() {
 
 /** Modo local: borra lo guardado en este navegador y vuelve a sembrar. */
 async function reiniciarLocal() {
-  if (!confirm('Esto borra los proyectos guardados en este navegador. ¿Continuar?')) return;
+  if (!confirm('Esto borra los proyectos guardados en este navegador y vuelve a cargar los de ejemplo. ¿Continuar?')) return;
   localStorage.removeItem(LKEY);
   await cargar();
   vista = { pantalla: 'general', proyecto: null, tab: 'actividades' };
   render();
-  aviso('Datos locales vaciados.');
+  aviso('Datos de ejemplo recargados.');
 }
 
 function abrir(id) { vista = { pantalla: 'proyecto', proyecto: id, tab: 'actividades' }; render(); }
@@ -1110,11 +1145,8 @@ async function entrar() { await pca.loginPopup({ scopes: ['Sites.ReadWrite.All']
 async function salir() { await pca.logoutPopup(); }
 
 /* ══════════════════════════════════════════════════════════════════════
-   8) ARRANQUE EN BLANCO
-   En modo 'sharepoint' esto no se usa: los datos vienen de la lista.
-   En modo 'local' arranca vacío — los proyectos se dan de alta con el
-   formulario y su plan de trabajo. Aquí no se guardan datos de clientes:
-   este archivo vive en un repositorio público.
+   8) ARRANQUE EN BLANCO — en modo 'sharepoint' los datos vienen de la lista.
+   Aquí no se guardan datos de clientes: este archivo vive en un repo público.
    ══════════════════════════════════════════════════════════════════════ */
 function semilla() {
   return { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };

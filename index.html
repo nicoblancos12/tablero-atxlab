@@ -299,6 +299,30 @@
   .pa-tag.atrasada{background:#FFE9E9;color:#a51f1f}
   .pa-tit{display:flex;align-items:baseline;gap:2px;flex-wrap:wrap}
   .pa-mas{margin-top:9px;font-size:12.5px}
+
+  /* ── panel de atención: filas anchas en vez de columnas ──────────── */
+  .panel-atencion{display:block;margin:18px 0 4px}
+  .pa-fila{background:#fff;border:1px solid var(--linea);border-radius:14px;
+           padding:14px 18px 16px;margin-bottom:12px}
+  .pa-cab{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:10px}
+  .pa-cab h4{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.8px;
+             color:var(--tenue);display:flex;align-items:center;gap:8px}
+  .pa-cab h4.mal{color:var(--rojo)}
+  .pa-cab h4.alerta{color:#9a6100}
+  .pa-items{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:0 22px}
+  .pa-item{padding:8px 0;border-bottom:0;border-left:2px solid transparent;padding-left:11px;cursor:pointer}
+  .pa-item.mal-item{border-left-color:var(--rojo)}
+  .pa-item.alerta-item{border-left-color:var(--ambar)}
+  .pa-item:hover{background:var(--tinte);border-radius:0 8px 8px 0}
+
+  /* ── resaltado al llegar desde el panel ──────────────────────────── */
+  .act.resaltada,.req.resaltada{animation:destello 2.6s ease-out;
+    box-shadow:0 0 0 2px var(--lavanda);border-radius:8px}
+  @keyframes destello{
+    0%{background:#EDE0FB}
+    35%{background:#EDE0FB}
+    100%{background:transparent}
+  }
 </style>
 </head>
 <body>
