@@ -5,12 +5,16 @@
    ══════════════════════════════════════════════════════════════════════ */
 
 const CONFIG = {
-  backend: 'local',            // 'local' (pruebas) | 'sharepoint' (compartido)
+  backend: 'sharepoint',       // 'local' (pruebas) | 'sharepoint' (compartido)
   clientId: 'e9fdfbd4-c437-466c-a4d7-057c9b2b79e7',
   tenantId: '3a5ef2b1-86c6-41bc-a30c-94709a8d0590',
   siteHost: 'atx1.sharepoint.com',
   sitePath: '/sites/atxlabProyectos',
   listName: 'Tablero atxlab',
+  // SharePoint reserva el nombre "Tipo" para una columna del sistema, así que
+  // la nuestra se llama TipoReg. Al leer se aceptan variantes por si la lista
+  // se creó con otro nombre.
+  campoTipo: 'TipoReg',
   pollSeconds: 30,
   ventanaDias: 14,             // la quincena que reporta el deck
 };
@@ -89,10 +93,11 @@ async function cargar() {
     const r = await graph(url);
     r.value.forEach((it) => {
       const f = it.fields || {};
-      if (!f.Tipo || !f.Datos) return;
+      const tipo = f[CONFIG.campoTipo] || f.TipoReg || f.Tipo || f.Tipo0 || f.TipoRegistro;
+      if (!tipo || !f.Datos) return;
       try {
         const d = JSON.parse(f.Datos);
-        if (nuevo[f.Tipo]) { nuevo[f.Tipo].push(d); SPID[d.id] = it.id; }
+        if (nuevo[tipo]) { nuevo[tipo].push(d); SPID[d.id] = it.id; }
       } catch (e) { console.warn('registro ilegible', it.id); }
     });
     url = r['@odata.nextLink'] || null;
@@ -106,7 +111,8 @@ async function guardar(tipo, obj) {
   if (i >= 0) lista[i] = obj; else lista.push(obj);
   if (CONFIG.backend === 'local') { localStorage.setItem(LKEY, JSON.stringify(DB)); return; }
   await resolverLista();
-  const fields = { Title: (obj.titulo || obj.nombre || tipo).slice(0, 200), Tipo: tipo, Ref: obj.id, Datos: JSON.stringify(obj) };
+  const fields = { Title: (obj.titulo || obj.nombre || tipo).slice(0, 200), Ref: obj.id, Datos: JSON.stringify(obj) };
+  fields[CONFIG.campoTipo] = tipo;
   if (SPID[obj.id]) {
     await graph('/sites/' + siteId + '/lists/' + listId + '/items/' + SPID[obj.id] + '/fields',
       { method: 'PATCH', body: JSON.stringify(fields) });
@@ -426,7 +432,7 @@ function renderGeneral() {
 
   app().innerHTML = '<div class="head"><h1>Proyectos en curso</h1>' +
     '<div class="acciones">' +
-    (CONFIG.backend === 'local' ? '<button class="btn ghost" onclick="reiniciarLocal()">Recargar datos de ejemplo</button>' : '') +
+    (CONFIG.backend === 'local' ? '<button class="btn ghost" onclick="reiniciarLocal()">Vaciar datos locales</button>' : '') +
     '<button class="btn" onclick="formProyecto()">Nuevo proyecto</button></div></div>' +
     '<div class="grid">' + (cards || '<p class="vacio">Todavía no hay proyectos dados de alta.</p>') + '</div>';
 }
@@ -966,12 +972,12 @@ function formPersona() {
 
 /** Modo local: borra lo guardado en este navegador y vuelve a sembrar. */
 async function reiniciarLocal() {
-  if (!confirm('Esto borra los proyectos guardados en este navegador y vuelve a cargar los de ejemplo. ¿Continuar?')) return;
+  if (!confirm('Esto borra los proyectos guardados en este navegador. ¿Continuar?')) return;
   localStorage.removeItem(LKEY);
   await cargar();
   vista = { pantalla: 'general', proyecto: null, tab: 'actividades' };
   render();
-  aviso('Datos de ejemplo recargados.');
+  aviso('Datos locales vaciados.');
 }
 
 function abrir(id) { vista = { pantalla: 'proyecto', proyecto: id, tab: 'actividades' }; render(); }
@@ -1104,138 +1110,14 @@ async function entrar() { await pca.loginPopup({ scopes: ['Sites.ReadWrite.All']
 async function salir() { await pca.logoutPopup(); }
 
 /* ══════════════════════════════════════════════════════════════════════
-   8) SEMILLA — SAG, para no arrancar en blanco
+   8) ARRANQUE EN BLANCO
+   En modo 'sharepoint' esto no se usa: los datos vienen de la lista.
+   En modo 'local' arranca vacío — los proyectos se dan de alta con el
+   formulario y su plan de trabajo. Aquí no se guardan datos de clientes:
+   este archivo vive en un repositorio público.
    ══════════════════════════════════════════════════════════════════════ */
-/* ── Arabela: cargado del plan de trabajo real, avances en cero ────── */
-function semillaArabela() {
-  const P = uid();
-  const A = (frente, nombre, horas, ini, fin) =>
-    ({ id: uid(), proyecto: P, frente, nombre, dueno: '', horas, avance: 0, ini, fin });
-  const R = (titulo, fecha, bloquea) =>
-    ({ id: uid(), proyecto: P, titulo, detalle: '', responsable: '', fecha, estado: 'pendiente', bloquea });
-  const acts = [
-    A('f1', 'Kick off del proyecto', 0, '2026-07-27', '2026-07-27'),
-    A('f1', 'Aceptacion formal del alcance v2.0 y trámites administrativos', 0, '2026-07-28', '2026-07-29'),
-    A('f1', 'Sesión técnica Meta: portafolio comercial, WABA y número', 0, '2026-07-28', '2026-07-29'),
-    A('f2', 'Casos de uso y taxonomía por perfil (interesado / prospecto / cliente)', 6, '2026-07-28', '2026-07-29'),
-    A('f2', 'Análisis de las fuentes de información existentes de ARABELA', 5, '2026-08-04', '2026-08-05'),
-    A('f2', 'Propuesta de arquitectura de información y plantilla de captura de conocimiento', 5, '2026-08-06', '2026-08-07'),
-    A('f2', 'Diseño conversacional, tono y adaptación al perfil del usuario', 8, '2026-08-10', '2026-08-11'),
-    A('f2', 'Criterios de escalamiento, KPIs, privacidad y cumplimiento', 6, '2026-08-12', '2026-08-13'),
-    A('f2', 'Arquitectura de la solución y Plan de prueba piloto', 10, '2026-08-14', '2026-08-18'),
-    A('f3', 'Habilitación de portafolio Meta, WABA, número y verificación', 12, '2026-07-30', '2026-08-12'),
-    A('f3', 'Entorno Jelpi y configuración del canal WhatsApp', 8, '2026-08-24', '2026-08-25'),
-    A('f3', 'Pipeline SharePoint - ingesta - índice vectorial (RAG)', 25, '2026-08-24', '2026-08-28'),
-    A('f3', 'Curaduría y estructuración del contenido inicial', 15, '2026-09-07', '2026-09-09'),
-    A('f3', 'Lógica conversacional y ruteo por perfil', 24, '2026-09-10', '2026-09-17'),
-    A('f3', 'Redireccion al portal de registro (perfil: convertirse en dama)', 5, '2026-09-18', '2026-09-18'),
-    A('f3', 'Captura de datos de contacto y escalamiento a agente humano', 12, '2026-09-18', '2026-09-22'),
-    A('f3', 'Encuesta de satisfacción al concluir la interacción', 6, '2026-09-23', '2026-09-24'),
-    A('f3', 'Golden set, pruebas de recuperación y tuning', 18, '2026-09-25', '2026-09-30'),
-    A('f3', 'Despliegue del piloto y medición', 5, '2026-10-01', '2026-10-02'),
-    A('f4', 'Facebook Messenger', 16, '2026-10-12', '2026-10-15'),
-    A('f4', 'Instagram Direct', 16, '2026-10-16', '2026-10-21'),
-    A('f4', 'Web chat: solución, endpoint, CTA a WhatsApp y documentación de integración', 22, '2026-10-12', '2026-10-16'),
-    A('f4', 'Continuidad de contexto por canal y manejo de sesión', 13, '2026-10-22', '2026-10-26'),
-    A('f5', 'Ampliacion y estructuración de la base de conocimiento (perfiles y casos de uso)', 20, '2026-10-27', '2026-11-02'),
-    A('f5', 'Herramienta de actualización de conocimiento (versionado, aprobación, reindexado)', 22, '2026-11-03', '2026-11-09'),
-    A('f5', 'Detección de gaps de conocimiento y tablero', 24, '2026-11-10', '2026-11-17'),
-    A('f5', 'Control y validación de respuestas del agente', 9, '2026-11-03', '2026-11-04'),
-    A('f5', 'Reportes de KPIs, volumen y escalamiento', 10, '2026-11-18', '2026-11-20'),
-    A('f5', 'Ajustes finales', 8, '2026-11-23', '2026-11-24'),
-    A('f6', 'Documentación técnica y funcional', 12, '2026-11-25', '2026-11-27'),
-    A('f6', 'Capacitación (Contact Center y administradores de contenido)', 10, '2026-12-02', '2026-12-03'),
-    A('f6', 'Migración a producción', 6, '2026-12-04', '2026-12-07'),
-    A('f6', 'Hypercare post puesta en marcha', 12, '2026-12-08', '2027-01-11'),
-    A('f6', 'Carta de aceptación de proyecto', 0, '2027-01-12', '2027-01-13'),
-    A('f6', 'Cierre del proyecto', 0, '2027-01-14', '2027-01-14'),
-  ];
-  const reqs = [
-    R('Habilitación de sitio SharePoint y usuario de servicio', '2026-07-30', []),
-    R('Entrega de información existente para análisis (catalogo, PDFs, listado de preguntas)', '2026-08-03', [acts[4].id]),
-    R('Validación y aprobación por ARABELA', '2026-08-21', [acts[10].id, acts[11].id]),
-    R('Llenado de la plantilla de conocimiento por ARABELA', '2026-09-04', [acts[12].id]),
-    R('Validación funcional del piloto por ARABELA', '2026-10-09', [acts[19].id, acts[21].id]),
-    R('Validación de canales por ARABELA', '2026-11-02', [acts[26].id]),
-    R('Validación integral por ARABELA', '2026-12-01', [acts[30].id]),
-  ];
-  const frentes = [{"clave":"f1","nombre":"Tareas previas","icono":"🚀"},{"clave":"f2","nombre":"Fase 0 - Descubrimiento y plan piloto","icono":"🔍"},{"clave":"f3","nombre":"Fase 1 - Piloto WhatsApp","icono":"💬"},{"clave":"f4","nombre":"Fase 2 - Expansión de canales","icono":"💬"},{"clave":"f5","nombre":"Fase 3 - Gobierno del conocimiento y analítica","icono":"📊"},{"clave":"f6","nombre":"Fase 4 - Cierre","icono":"🏁"}];
-  const hitos = [{"nombre":"Propuesta técnica, arquitectura, plantilla de conocimiento y plan de piloto","fecha":"2026-08-18"},{"nombre":"Piloto en operación sobre WhatsApp","fecha":"2026-10-02"},{"nombre":"Agente operando en WhatsApp, Messenger, Instagram y Web","fecha":"2026-10-26"},{"nombre":"Gobierno del conocimiento y analítica implementados","fecha":"2026-11-24"}];
-  const finPlan = '2027-01-14';
-  const kickoff = '2026-07-27';
-  const nombre = 'Agente Virtual IA para Clientes y Prospectos';
-  const cliente = 'ARABELA';
-
-  return {
-    proyecto: {
-      id: P, nombre, cliente,
-      objetivo: 'Atender a clientes y prospectos con un agente de IA sobre WhatsApp, Messenger, Instagram y web.',
-      contactoCliente: '', kickoff, fin: finPlan, proximaSesion: '',
-      frentes, hitos,
-    },
-    actividad: acts, requisito: reqs,
-  };
-}
-
 function semilla() {
-  const P = uid();
-  const A = (frente, nombre, dueno, horas, ini, fin, avance) =>
-    ({ id: uid(), proyecto: P, frente, nombre, dueno, horas, ini, fin, avance });
-  const acts = [
-    A('motor', 'Calibración del motor con los criterios de la operación', 'Elian Ramirez', 30, '2026-08-10', '2026-08-28', 75),
-    A('motor', 'Grounding del agente con la información del CRM', 'Elian Ramirez', 20, '2026-08-17', '2026-09-04', 25),
-    A('motor', 'Barrido definitivo de fuentes', 'Elian Ramirez', 46, '2026-08-24', '2026-09-18', 0),
-    A('motor', 'Scorer de señales', 'Elian Ramirez', 24, '2026-09-07', '2026-09-25', 0),
-    A('motor', 'Reinforcement learning del motor', 'Elian Ramirez', 40, '2026-09-14', '2026-10-09', 0),
-    A('plataforma', 'Arquitectura de la solución y servicios de Azure', 'Rodrigo Vidal', 8, '2026-08-10', '2026-08-14', 100),
-    A('plataforma', 'Aprovisionamiento del entorno de desarrollo', 'Rodrigo Vidal', 22, '2026-08-17', '2026-09-04', 0),
-    A('plataforma', 'Backend y modelo de datos del dashboard', 'Rodrigo Vidal', 40, '2026-08-24', '2026-09-25', 0),
-    A('plataforma', 'Frontend del dashboard', 'Rodrigo Vidal', 32, '2026-09-14', '2026-10-09', 0),
-  ];
-  const R = (titulo, detalle, fecha, bloquea) =>
-    ({ id: uid(), proyecto: P, titulo, detalle, responsable: 'Hector Nuñez', fecha, estado: 'pendiente', bloquea });
-  const base = {
-    proyecto: [{
-      id: P, nombre: 'Opportunity Radar', cliente: 'SAG',
-      objetivo: 'Detectar de forma continua señales de mercado que puedan detonar una oportunidad de negocio para SAG.',
-      contactoCliente: 'Hector Nuñez', kickoff: '2026-08-10', fin: '2026-10-16', proximaSesion: '2026-09-08',
-      frentes: [
-        { clave: 'motor', nombre: 'Motor de inteligencia', icono: '🧠' },
-        { clave: 'plataforma', nombre: 'Plataforma y nube', icono: '☁️' },
-      ],
-      hitos: [
-        { nombre: 'Arranque y arquitectura', fecha: '2026-08-14' },
-        { nombre: 'Calibración y grounding', fecha: '2026-08-28' },
-        { nombre: 'Cutover del motor', fecha: '2026-09-11' },
-        { nombre: 'Ambiente de staging', fecha: '2026-10-02' },
-        { nombre: 'Pruebas de aceptación', fecha: '2026-10-09' },
-        { nombre: 'Salida a producción', fecha: '2026-10-16' },
-      ],
-    }],
-    actividad: acts,
-    requisito: [
-      R('Alta de cuentas en el Azure de desarrollo',
-        'La lista de permisos requeridos ya fue entregada al equipo que administra el Azure de SAG.',
-        '2026-09-01', [acts[6].id]),
-      R('Whitelist de fuentes y temas a investigar',
-        'Nombres o URLs de los portales que consulta el equipo comercial, y los temas que el agente debe vigilar.',
-        '2026-09-05', [acts[2].id]),
-      R('Reportes del CRM en formato tabla',
-        'atxlab entregó el documento con la información que debe llevar cada reporte.',
-        '2026-09-05', [acts[1].id]),
-    ],
-    comentario: [],
-    persona: [
-      { id: uid(), nombre: 'Nicolas Blanco', rol: 'AI Solutions Architect', correo: 'nicolas@atx.mx' },
-      { id: uid(), nombre: 'Rodrigo Vidal', rol: 'Responsable técnico', correo: '' },
-      { id: uid(), nombre: 'Elian Ramirez', rol: 'Programador', correo: '' },
-    ],
-  };
-  const ara = semillaArabela();
-  base.proyecto.push(ara.proyecto);
-  base.actividad = base.actividad.concat(ara.actividad);
-  base.requisito = base.requisito.concat(ara.requisito);
-  return base;
+  return { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };
 }
 
 window.addEventListener('DOMContentLoaded', iniciar);
