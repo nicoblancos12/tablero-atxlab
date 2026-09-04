@@ -25,8 +25,7 @@ const CONTACTO_CIERRE = 'Nicolas Blanco  ·  nicolas@atx.mx  ·  +52 241 135 389
 let DB = { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };
 const SPID = {};
 let usuario = null;
-let vista = { pantalla: 'general', proyecto: null, tab: 'actividades', filtro: 'todas',
-              filtroProyectos: 'todos', busqueda: '' };
+let vista = { pantalla: 'general', proyecto: null, tab: 'actividades', filtro: 'todas' };
 let borrador = null;           // plan cargado, esperando confirmación
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -216,26 +215,58 @@ function metricas(p) {
   const m = { sem: semanaActual(p), semTot: semanasTotales(p), total, pReal, pPlan, delta,
               semaforo, sinHoras, sinFechas, sinPlan,
               reqAbiertos, vencidos, detenidas, riesgos, atrasadas, horasReales: real };
-  m.estimado = fechaEstimada(p, m);
-  m.desvioDias = m.estimado ? dias(p.fin, m.estimado) : null;
+  m.retraso = retrasoDias(p, m);
+  m.estimado = m.retraso === null ? null : PlanATX.masDias(p.fin, m.retraso);
+  m.desvioDias = m.retraso;
   return m;
 }
 
 /**
- * Fecha estimada de cierre. Proyecta el ritmo observado hasta hoy sobre lo
- * que falta: si vamos al 60% del ritmo planeado, lo que resta tarda 1/0.6.
- * Es una proyección lineal, no una replanificación — sirve para ver la
- * tendencia, no para comprometer una fecha nueva con el cliente.
+ * Retraso medido en TIEMPO, no en proporción.
+ *
+ * Busca en qué fecha el plan alcanzaba el avance que tenemos hoy. Si el plan
+ * llegaba a este punto hace 20 días, vamos 20 días atrás y el cierre se
+ * recorre 20 días. Antes esto era una regla de tres sobre el ritmo
+ * (avance/plan), que en las primeras semanas divide entre un número diminuto
+ * y proyectaba disparates: 18 puntos abajo en la semana 2 daban 587 días.
  */
-function fechaEstimada(p, m) {
+function curvaPlan(p, f) {
+  const acts = actsDe(p.id);
+  const horas = acts.reduce((s, a) => s + (+a.horas || 0), 0);
+  const sinHoras = horas === 0 && acts.length > 0;
+  const peso = (a) => (sinHoras ? 1 : (+a.horas || 0));
+  const total = sinHoras ? acts.length : (horas || 1);
+  const acum = acts.reduce((s, a) => {
+    if (!a.ini || !a.fin) return s;
+    const dur = Math.max(1, dias(a.ini, a.fin) + 1);
+    return s + peso(a) * Math.max(0, Math.min(1, (dias(a.ini, f) + 1) / dur));
+  }, 0);
+  return acum / total * 100;
+}
+
+/** Días de retraso: cuánto tiempo atrás quedó el avance real respecto al plan. */
+function retrasoDias(p, m) {
+  if (m.sinPlan || !p.fin || p.fin <= p.kickoff) return null;
+  // Con muy poco avance capturado no hay evidencia para proyectar nada.
+  if (m.pReal < 5) return null;
+  if (dias(p.kickoff, hoyISO()) < 10) return null;
+
   const hoy = hoyISO();
-  if (!p.fin || p.fin <= p.kickoff) return null;       // no hay fecha de cierre real
-  if (m.sinPlan) return null;
-  if (m.pReal <= 0 && m.pPlan > 0) return null;        // sin avance capturado, no hay tendencia
-  const ritmo = m.pPlan > 0 ? m.pReal / m.pPlan : 1;
-  const restantes = Math.max(0, dias(hoy, p.fin));
-  const factor = Math.max(0.2, Math.min(ritmo, 2));    // topes para no proyectar absurdos
-  return PlanATX.masDias(hoy, Math.round(restantes / factor));
+  // La curva del plan no decrece, así que se puede buscar por bisección.
+  let lo = 0, hi = dias(p.kickoff, p.fin);
+  if (curvaPlan(p, p.fin) < m.pReal) return dias(p.fin, hoy);   // vamos adelante del plan completo
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (curvaPlan(p, PlanATX.masDias(p.kickoff, mid)) >= m.pReal) hi = mid; else lo = mid + 1;
+  }
+  return dias(PlanATX.masDias(p.kickoff, lo), hoy);
+}
+
+/** Cierre estimado = fecha acordada recorrida por el retraso observado. */
+function fechaEstimada(p, m) {
+  const r = retrasoDias(p, m);
+  if (r === null) return null;
+  return PlanATX.masDias(p.fin, r);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -402,15 +433,21 @@ function cierres(p, m) {
     (valida ? fechaFull(p.fin) : 'sin definir') + '</b></span>';
   if (!m.estimado) {
     const motivo = !valida ? 'falta la fecha de cierre'
-      : (m.sinFechas ? 'las actividades no tienen fechas' : 'sin avance capturado');
+      : (m.sinFechas ? 'las actividades no tienen fechas'
+      : (m.pReal < 5 ? 'muy poco avance capturado para proyectar'
+      : 'aún no hay historial suficiente'));
     return '<div class="cierres">' + acordada +
       '<span class="cierre sin">Cierre estimado<b>' + motivo + '</b></span></div>';
   }
+  // En semanas: "23 días después" sugiere una precisión que el dato no tiene.
   const d = m.desvioDias;
-  const cls = d <= 0 ? 'ok' : (d <= 7 ? 'alerta' : 'mal');
-  const txt = d === 0 ? 'en la fecha acordada' : (d > 0 ? d + ' días después' : Math.abs(d) + ' días antes');
+  const cls = d <= 3 ? 'ok' : (d <= 14 ? 'alerta' : 'mal');
+  const sem = Math.round(Math.abs(d) / 7);
+  const txt = Math.abs(d) <= 3 ? 'en la fecha acordada'
+    : (sem <= 1 ? (d > 0 ? '≈1 semana después' : '≈1 semana antes')
+               : '≈' + sem + ' semanas ' + (d > 0 ? 'después' : 'antes'));
   return '<div class="cierres">' + acordada +
-    '<span class="cierre estimada ' + cls + '">Cierre estimado por el ritmo actual' +
+    '<span class="cierre estimada ' + cls + '">Cierre estimado con el retraso actual' +
     '<b>' + fechaFull(m.estimado) + '</b><i>' + txt + '</i></span></div>';
 }
 
@@ -489,103 +526,32 @@ function chipSemDetalle(p, m) {
 }
 
 function render() {
-  renderSidenav();
   if (vista.pantalla === 'general') return renderGeneral();
   if (vista.pantalla === 'equipo') return renderEquipo();
   if (vista.pantalla === 'confirmar') return renderConfirmar();
   return renderProyecto();
 }
 
-/** Un proyecto se considera entregado cuando su avance real llegó al 100%. */
-const proyectoEntregado = (m) => m.pReal >= 100;
-
-const FILTROS_PROYECTO = {
-  todos:      { etq: 'Proyectos en curso', test: (m) => !proyectoEntregado(m) },
-  entregados: { etq: 'Entregados',         test: (m) => proyectoEntregado(m) },
-  riesgo:     { etq: 'En riesgo',          test: (m) => !proyectoEntregado(m) && m.semaforo === 'rojo' },
-};
-
-function buscar(texto) {
-  vista.busqueda = texto || '';
-  if (vista.pantalla === 'general') renderGeneral();
-}
-function ponerFiltroProyectos(f) {
-  vista.filtroProyectos = f;
-  if (vista.pantalla !== 'general') { vista.pantalla = 'general'; }
-  render();
-}
-
 function renderGeneral() {
-  const conMetricas = DB.proyecto.map((p) => ({ p, m: metricas(p) }));
-  const activos = conMetricas.filter(({ m }) => !proyectoEntregado(m));
-
-  const kpis = [
-    { etq: 'Activos', val: activos.length, clase: 'violet' },
-    { etq: 'En tiempo', val: activos.filter((x) => x.m.semaforo === 'verde').length, clase: 'verde' },
-    { etq: 'En riesgo', val: activos.filter((x) => x.m.semaforo === 'rojo').length, clase: 'rojo' },
-    { etq: 'Entregables vencidos', val: activos.reduce((s, x) => s + x.m.vencidos.length, 0), clase: 'rojo' },
-  ];
-  const kpiStrip = DB.proyecto.length ? '<div class="kpis">' + kpis.map((k) =>
-    '<div class="kpi"><div class="kpi-etq">' + k.etq + '</div>' +
-    '<div class="kpi-val' + (k.clase ? ' ' + k.clase : '') + '">' + k.val + '</div></div>').join('') + '</div>' : '';
-
-  const filtro = FILTROS_PROYECTO[vista.filtroProyectos] || FILTROS_PROYECTO.todos;
-  const q = (vista.busqueda || '').trim().toLowerCase();
-  const visibles = DB.proyecto.map((p) => ({ p, m: metricas(p) }))
-    .filter(({ m }) => filtro.test(m))
-    .filter(({ p }) => !q || (p.nombre + ' ' + p.cliente).toLowerCase().indexOf(q) >= 0);
-
-  const cards = visibles.map(({ p, m }) => {
+  const cards = DB.proyecto.map((p) => {
+    const m = metricas(p);
     return '<div class="card proj" onclick="abrir(\'' + p.id + '\')">' +
       '<div class="card-top"><div><div class="cliente">' + esc(p.cliente) + '</div>' +
       '<h3>' + esc(p.nombre) + '</h3></div>' + chipSem(m.semaforo) + '</div>' +
-      '<div class="pct">' + m.pReal + '%<span>de avance</span><span class="plan">plan ' + m.pPlan + '%</span></div>' +
+      '<div class="pct">' + m.pReal + '%<span> de avance · plan ' + m.pPlan + '%</span></div>' +
       barra(m.pReal, m.pPlan) +
-      '<div class="semana-linea">Semana ' + m.sem + (m.semTot ? ' de ' + m.semTot : '') + '</div>' +
-      '<div class="card-meta ' + (m.vencidos.length ? 'alerta' : (m.reqAbiertos.length ? '' : 'ok')) + '"><i></i>' +
-      (m.vencidos.length ? m.vencidos.length + ' entregable(s) del cliente vencido(s)' :
-        (m.reqAbiertos.length ? m.reqAbiertos.length + ' pendiente(s) del cliente' :
-          'Sin pendientes del cliente')) +
+      '<div class="meta"><span>Semana ' + m.sem + (m.semTot ? ' de ' + m.semTot : '') + '</span>' +
+      (m.vencidos.length ? '<span class="alerta">' + m.vencidos.length + ' entregable(s) del cliente vencido(s)</span>' :
+        (m.reqAbiertos.length ? '<span>' + m.reqAbiertos.length + ' pendiente(s) del cliente</span>' :
+          '<span class="ok">Sin pendientes del cliente</span>')) +
       '</div></div>';
   }).join('');
 
-  const vacioTxt = q ? 'Ningún proyecto coincide con "' + esc(vista.busqueda) + '".'
-    : (vista.filtroProyectos === 'entregados' ? 'Todavía no hay proyectos entregados.'
-    : (vista.filtroProyectos === 'riesgo' ? 'Ningún proyecto está en riesgo ahora mismo.'
-    : 'Todavía no hay proyectos dados de alta.'));
-
-  app().innerHTML = '<div class="head"><h1>' + esc(filtro.etq) + '</h1>' +
+  app().innerHTML = '<div class="head"><h1>Proyectos en curso</h1>' +
     '<div class="acciones">' +
     (CONFIG.backend === 'local' ? '<button class="btn ghost" onclick="reiniciarLocal()">Vaciar datos locales</button>' : '') +
-    '<button class="btn" onclick="formProyecto()">+ Nuevo proyecto</button></div></div>' +
-    kpiStrip +
-    '<div class="grid">' + (cards || '<p class="vacio">' + vacioTxt + '</p>') + '</div>';
-}
-
-/* ── barra lateral ────────────────────────────────────────────────── */
-function renderSidenav() {
-  const el = $('#sidenav');
-  if (!el) return;
-  const metricasTodas = DB.proyecto.map((p) => metricas(p));
-  const nEntregados = metricasTodas.filter(proyectoEntregado).length;
-  const nRiesgo = metricasTodas.filter((m) => m.semaforo === 'rojo').length;
-  const enGeneral = vista.pantalla === 'general';
-
-  const item = (id, icono, etq, count, onclick, activo) =>
-    '<button class="nav-item' + (activo ? ' on' : '') + '" onclick="' + onclick + '">' +
-    '<span class="ic">' + icono + '</span>' + esc(etq) +
-    (count != null ? '<span class="count">' + count + '</span>' : '') + '</button>';
-
-  el.innerHTML =
-    '<div class="grp-label">Proyectos</div>' +
-    item('todos', '▦', 'Proyectos en curso', DB.proyecto.length, "ponerFiltroProyectos('todos')",
-      enGeneral && vista.filtroProyectos === 'todos') +
-    item('entregados', '✓', 'Entregados', nEntregados, "ponerFiltroProyectos('entregados')",
-      enGeneral && vista.filtroProyectos === 'entregados') +
-    item('riesgo', '⚠', 'En riesgo', nRiesgo, "ponerFiltroProyectos('riesgo')",
-      enGeneral && vista.filtroProyectos === 'riesgo') +
-    '<div class="grp-label">Equipo</div>' +
-    item('equipo', '◎', 'Equipo atxlab', DB.persona.length, 'irEquipo()', vista.pantalla === 'equipo');
+    '<button class="btn" onclick="formProyecto()">Nuevo proyecto</button></div></div>' +
+    '<div class="grid">' + (cards || '<p class="vacio">Todavía no hay proyectos dados de alta.</p>') + '</div>';
 }
 
 /**
@@ -1183,12 +1149,12 @@ async function reiniciarLocal() {
   if (!confirm('Esto borra los proyectos guardados en este navegador y vuelve a cargar los de ejemplo. ¿Continuar?')) return;
   localStorage.removeItem(LKEY);
   await cargar();
-  Object.assign(vista, { pantalla: 'general', proyecto: null, tab: 'actividades' });
+  vista = { pantalla: 'general', proyecto: null, tab: 'actividades' };
   render();
   aviso('Datos de ejemplo recargados.');
 }
 
-function abrir(id) { Object.assign(vista, { pantalla: 'proyecto', proyecto: id, tab: 'actividades' }); render(); }
+function abrir(id) { vista = { pantalla: 'proyecto', proyecto: id, tab: 'actividades' }; render(); }
 function volver() { vista.pantalla = 'general'; render(); }
 function irEquipo() { vista.pantalla = 'equipo'; render(); }
 function irTab(t) { vista.tab = t; render(); }
@@ -1273,40 +1239,13 @@ function aviso(t) {
   clearTimeout(aviso._t); aviso._t = setTimeout(() => d.classList.remove('on'), 4000);
 }
 
-/* ── tema claro/oscuro ─────────────────────────────────────────────── */
-function aplicarTema(tema) {
-  document.documentElement.dataset.theme = tema;
-  const btn = $('#temaBtn');
-  if (btn) btn.textContent = tema === 'oscuro' ? '☀' : '☾';
-}
-function alternarTema() {
-  const actual = document.documentElement.dataset.theme === 'oscuro' ? 'oscuro' : 'claro';
-  const nuevo = actual === 'oscuro' ? 'claro' : 'oscuro';
-  try { localStorage.setItem('atxlab-tema', nuevo); } catch (e) {}
-  aplicarTema(nuevo);
-}
-(function iniciarTema() {
-  let tema = 'claro';
-  try {
-    const guardado = localStorage.getItem('atxlab-tema');
-    if (guardado === 'claro' || guardado === 'oscuro') tema = guardado;
-  } catch (e) {}
-  aplicarTema(tema);
-})();
-
 /* ══════════════════════════════════════════════════════════════════════
    7) ARRANQUE
    ══════════════════════════════════════════════════════════════════════ */
-function pintarUsuario(sufijo) {
-  $('#quien').textContent = usuario.nombre + (sufijo || '');
-  const iniciales = usuario.nombre.split(' ').filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
-  $('#avatar').textContent = iniciales;
-}
-
 async function iniciar() {
   if (CONFIG.backend === 'local') {
     usuario = { nombre: 'Nicolas Blanco', correo: '' };
-    pintarUsuario(' · modo local');
+    $('#quien').textContent = usuario.nombre + ' · modo local';
     await cargar(); render();
     return;
   }
@@ -1322,7 +1261,7 @@ async function iniciar() {
   try {
     await cargar();
     $('#gate').style.display = 'none';
-    pintarUsuario();
+    $('#quien').textContent = usuario.nombre;
     render();
     setInterval(async () => {
       if (vista.pantalla === 'general') { await cargar(); render(); }
