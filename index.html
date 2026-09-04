@@ -437,6 +437,20 @@
     35%{background:#EDE0FB}
     100%{background:transparent}
   }
+
+  /* ── avance de la actividad: el color dice cuánto lleva ──────────── */
+  .palomear.av-0{background:var(--panel);border-color:var(--linea);color:var(--tenue)}
+  .palomear.av-25{background:var(--tinte);border-color:var(--lavanda);color:var(--vivo)}
+  .palomear.av-50{background:var(--violet-dim);border-color:var(--lavanda);color:var(--morado)}
+  .palomear.av-75{background:var(--vivo);border-color:var(--vivo);color:#fff}
+  .palomear.av-100{background:var(--verde);border-color:var(--verde);color:#fff;font-size:15px}
+
+  /* ── estatus sin datos de plan ───────────────────────────────────── */
+  .chip-sin{border-color:var(--tenue);color:var(--tenue);border-style:dashed}
+  .chip-sin i{background:var(--tenue)}
+  .razon.r-sin{color:var(--tenue);border-color:var(--linea);background:var(--panel2)}
+  .razon.r-sin i{background:var(--tenue)}
+  .sem-razones li.r-sin::before{background:var(--tenue)}
 </style>
 </head>
 <body>

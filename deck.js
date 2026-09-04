@@ -135,64 +135,310 @@ function lineaHitos(s, hitos, { y }) {
   });
 }
 
-function frentesTrabajo(s, frentes, { y }) {
-  const n = frentes.length, gap = 0.35, w = (G.ancho - gap * (n - 1)) / n;
-  const hayDet = frentes.some((f) => (f.detenidas || []).length);
-  const maxF = Math.max.apply(null, frentes.map((f) => (f.cerradas || []).length + (f.enCurso || []).length + (f.detenidas || []).length));
-  const h = Math.min(1.18 + maxF * 0.54, 4.3);
+/**
+ * Estima en cuántas líneas cae un texto. PowerPoint no nos deja medir de
+ * verdad, así que aproximamos el ancho medio de carácter de Calibri
+ * (~0.48 em, ~0.52 en negritas) y simulamos el salto por palabra.
+ * Es conservador a propósito: preferimos una tarjeta con aire de más que
+ * un texto encimado.
+ */
+function nLineas(txt, ancho, fs, bold) {
+  const porLinea = Math.max(8, ancho * 72 / (fs * (bold ? 0.52 : 0.48)));
+  const palabras = String(txt || '').split(/\s+/).filter(Boolean);
+  let n = 1, largo = 0;
+  palabras.forEach((p) => {
+    const add = largo ? largo + 1 + p.length : p.length;
+    if (add > porLinea && largo) { n++; largo = p.length; } else { largo = add; }
+  });
+  return n;
+}
+const altoTexto = (l, fs) => l * (fs * 1.28) / 72;
+
+/* ── Avance compacto: número + barra en una sola franja ──────────────── */
+function avanceCompacto(slide, { real, plan, y = 2.35 }) {
+  const r = Math.max(0, Math.min(100, Math.round(real)));
+  const p = Math.max(0, Math.min(100, Math.round(plan)));
+
+  slide.addText(r + '%', {
+    x: G.M, y, w: 2.1, h: 0.85, fontFace: FUENTE, fontSize: 40, bold: true,
+    color: C.moradoProfundo, valign: 'middle', margin: 0,
+  });
+  slide.addText('de avance real', {
+    x: G.M, y: y + 0.78, w: 2.1, h: 0.3, fontFace: FUENTE, fontSize: 11.5,
+    color: C.cuerpo, margin: 0,
+  });
+
+  const bx = 2.95, bw = G.M + G.ancho - bx, bh = 0.38, by = y + 0.24;
+  slide.addShape('roundRect', { x: bx, y: by, w: bw, h: bh, rectRadius: 0.19,
+    fill: { color: C.tinte }, line: { color: C.lavanda, width: 1 } });
+  if (r > 0) slide.addShape('roundRect', { x: bx, y: by, w: Math.max(bw * r / 100, 0.38), h: bh,
+    rectRadius: 0.19, fill: { color: C.moradoVivo }, line: { color: C.moradoVivo, width: 1 } });
+
+  const px = bx + bw * p / 100;
+  slide.addShape('line', { x: px, y: by - 0.1, w: 0, h: bh + 0.2,
+    line: { color: C.moradoProfundo, width: 1.75, dashType: 'dash' } });
+  slide.addText('plan ' + p + '%', {
+    x: Math.min(Math.max(px - 0.8, bx), bx + bw - 1.6), y: by - 0.4, w: 1.6, h: 0.28,
+    fontFace: FUENTE, fontSize: 10.5, color: C.tenue, align: 'center', margin: 0,
+  });
+
+  // El chip va DEBAJO de la barra: arriba choca con títulos de dos líneas.
+  const d = r - p;
+  const col = d >= -3 ? EST.verde : (d >= -10 ? EST.ambar : EST.rojo);
+  const txt = d === 0 ? 'En línea con el plan'
+    : (d > 0 ? d + ' puntos adelante del plan' : Math.abs(d) + ' puntos abajo del plan');
+  slide.addShape('roundRect', { x: bx, y: by + bh + 0.14, w: 3.4, h: 0.38, rectRadius: 0.19,
+    fill: { color: C.blanco }, line: { color: col, width: 1.25 } });
+  slide.addShape('ellipse', { x: bx + 0.2, y: by + bh + 0.24, w: 0.17, h: 0.17, fill: { color: col } });
+  slide.addText(txt, { x: bx + 0.45, y: by + bh + 0.14, w: 2.9, h: 0.38, fontFace: FUENTE,
+    fontSize: 11, bold: true, color: C.moradoProfundo, valign: 'middle', margin: 0 });
+}
+
+/* ── Gantt: dónde vamos contra dónde deberíamos estar ────────────────── */
+/**
+ * g = { semanas, semanaActual, filas: [{nombre, ini, fin, avance, plan}], hitos }
+ *   ini/fin en número de semana (0 = semana de kickoff)
+ *   avance/plan en porcentaje de esa fila
+ * Cada barra lleva el relleno real y una marca de dónde debería ir el plan,
+ * que es justo la comparación que pide la sesión de avance.
+ */
+function gantt(slide, g, { y = 3.85, alto = 3.0 } = {}) {
+  const filas = (g.filas || []).slice(0, 6);
+  if (!filas.length) return;
+
+  const xEtq = G.M, wEtq = 3.15;
+  const x0 = xEtq + wEtq + 0.25, x1 = G.M + G.ancho;
+  const ancho = x1 - x0;
+  const sem = Math.max(1, g.semanas);
+  const px = (s) => x0 + ancho * Math.max(0, Math.min(sem, s)) / sem;
+
+  // El presupuesto de alto reserva el eje (0.34) y la leyenda (0.6):
+  // sin esa reserva la leyenda se montaba sobre el pie de página.
+  const hFila = Math.min(0.46, (alto - 0.95) / filas.length);
+  const yEje = y + 0.34;
+
+  // Eje de semanas
+  const paso = sem > 12 ? Math.ceil(sem / 10) : 1;
+  for (let s = 0; s <= sem; s += paso) {
+    slide.addText('S' + s, { x: px(s) - 0.22, y: y - 0.04, w: 0.44, h: 0.28,
+      fontFace: FUENTE, fontSize: 9.5, color: C.tenue, align: 'center', margin: 0 });
+    slide.addShape('line', { x: px(s), y: yEje, w: 0, h: filas.length * hFila + 0.12,
+      line: { color: 'F0E8FA', width: 0.75 } });
+  }
+  slide.addShape('line', { x: x0, y: yEje, w: ancho, h: 0, line: { color: C.lavanda, width: 1 } });
+
+  // Hitos sobre el eje
+  (g.hitos || []).slice(0, 6).forEach((h) => {
+    const cx = px(h.semana);
+    slide.addShape('diamond', { x: cx - 0.09, y: yEje - 0.09, w: 0.18, h: 0.18,
+      fill: { color: h.cumplido ? C.moradoProfundo : C.blanco },
+      line: { color: C.moradoProfundo, width: 1.25 } });
+  });
+
+  // Línea de hoy
+  const hx = px(g.semanaActual);
+  const hAlto = filas.length * hFila + 0.22;
+  slide.addShape('line', { x: hx, y: yEje - 0.08, w: 0, h: hAlto,
+    line: { color: EST.ambar, width: 1.5, dashType: 'dash' } });
+  slide.addText('hoy', { x: hx - 0.3, y: yEje + hAlto - 0.06, w: 0.6, h: 0.24,
+    fontFace: FUENTE, fontSize: 9.5, bold: true, color: EST.ambar, align: 'center', margin: 0 });
+
+  filas.forEach((f, i) => {
+    const yy = yEje + 0.14 + i * hFila;
+    const hb = Math.min(0.26, hFila - 0.16);
+
+    // Nombre y porcentajes en el mismo renglón: apilados se tocaban.
+    slide.addText(f.nombre, { x: xEtq, y: yy - 0.06, w: wEtq - 1.15, h: hb + 0.12,
+      fontFace: FUENTE, fontSize: 10.5, color: C.moradoProfundo, valign: 'middle', margin: 0 });
+    slide.addText(f.avance + '% · plan ' + f.plan + '%', {
+      x: xEtq + wEtq - 1.15, y: yy - 0.06, w: 1.15, h: hb + 0.12,
+      fontFace: FUENTE, fontSize: 9, color: C.tenue, align: 'right', valign: 'middle', margin: 0 });
+
+    const bx = px(f.ini), bw = Math.max(px(f.fin) - bx, 0.12);
+    slide.addShape('roundRect', { x: bx, y: yy, w: bw, h: hb, rectRadius: hb / 2,
+      fill: { color: C.tinte }, line: { color: C.lavanda, width: 0.75 } });
+    if (f.avance > 0) {
+      slide.addShape('roundRect', { x: bx, y: yy, w: Math.max(bw * f.avance / 100, hb),
+        h: hb, rectRadius: hb / 2, fill: { color: C.moradoVivo }, line: { color: C.moradoVivo, width: 0.75 } });
+    }
+    // Dónde debería ir según el plan
+    const mx = bx + bw * Math.max(0, Math.min(100, f.plan)) / 100;
+    slide.addShape('line', { x: mx, y: yy - 0.07, w: 0, h: hb + 0.14,
+      line: { color: C.moradoProfundo, width: 1.5 } });
+  });
+
+  // Leyenda
+  const ly = yEje + 0.3 + filas.length * hFila + 0.06;
+  slide.addShape('roundRect', { x: G.M, y: ly + 0.06, w: 0.3, h: 0.13, rectRadius: 0.065,
+    fill: { color: C.moradoVivo }, line: { color: C.moradoVivo, width: 0.5 } });
+  slide.addText('avance real', { x: G.M + 0.38, y: ly, w: 1.5, h: 0.26,
+    fontFace: FUENTE, fontSize: 10, color: C.tenue, valign: 'middle', margin: 0 });
+  slide.addShape('line', { x: G.M + 2.0, y: ly, w: 0, h: 0.26, line: { color: C.moradoProfundo, width: 1.5 } });
+  slide.addText('dónde debería ir el plan', { x: G.M + 2.12, y: ly, w: 2.4, h: 0.26,
+    fontFace: FUENTE, fontSize: 10, color: C.tenue, valign: 'middle', margin: 0 });
+  slide.addShape('diamond', { x: G.M + 4.75, y: ly + 0.05, w: 0.16, h: 0.16,
+    fill: { color: C.blanco }, line: { color: C.moradoProfundo, width: 1.25 } });
+  slide.addText('hito', { x: G.M + 4.99, y: ly, w: 0.8, h: 0.26,
+    fontFace: FUENTE, fontSize: 10, color: C.tenue, valign: 'middle', margin: 0 });
+}
+
+/* ── Frentes de trabajo, con alto calculado del contenido ────────────── */
+/**
+ * frentes: [{ titulo, icono, cerradas, enCurso, detenidas }]
+ * Cada elemento puede ser texto o { texto, avance }. El avance se pinta a
+ * la derecha del renglón, que era justo lo que faltaba para saber si algo
+ * va en 25 o en 75.
+ */
+function frentesTrabajo(slide, frentes, { y = 2.4, leyenda = true, maxAlto = 4.15 } = {}) {
+  const n = Math.max(1, frentes.length), gap = 0.32;
+  const w = (G.ancho - gap * (n - 1)) / n;
+  const wTit = w - 1.3, wItem = w - 1.35;
+
+  const norm = (it) => (typeof it === 'string' ? { texto: it } : it);
+  const cuerpo = (f) => [].concat(
+    (f.detenidas || []).map((t) => ({ ...norm(t), e: 'stop' })),
+    (f.enCurso || []).map((t) => ({ ...norm(t), e: 'curso' })),
+    (f.cerradas || []).map((t) => ({ ...norm(t), e: 'ok' })),
+  );
+
+  // Buscamos el tipo de letra más grande con el que todo cabe
+  let fs = 11.5, lh, filas, alto;
+  for (;;) {
+    lh = altoTexto(1, fs) + 0.06;
+    filas = frentes.map((f) => cuerpo(f).map((it) => ({
+      ...it, l: nLineas(it.texto, wItem, fs, it.e !== 'ok'),
+    })));
+    const titL = frentes.map((f) => nLineas(f.titulo, wTit, Math.min(14, fs + 2.5), true));
+    alto = 0;
+    frentes.forEach((f, i) => {
+      const enc = Math.max(0.62, altoTexto(titL[i], Math.min(14, fs + 2.5)) + 0.12);
+      const h = 0.26 + enc + 0.22 + filas[i].reduce((s, r) => s + r.l * lh + 0.14, 0) + 0.18;
+      alto = Math.max(alto, h);
+    });
+    if (alto <= maxAlto || fs <= 9) break;
+    fs -= 0.5;
+  }
+  const fsTit = Math.min(14, fs + 2.5);
+  alto = Math.min(alto, maxAlto);
+
   frentes.forEach((f, i) => {
     const x = G.M + i * (w + gap);
-    s.addShape('roundRect', { x, y, w, h, rectRadius: 0.12, fill: { color: C.tinte }, line: { color: C.lavanda, width: 1 } });
-    s.addShape('ellipse', { x: x + 0.32, y: y + 0.28, w: 0.55, h: 0.55, fill: { color: C.blanco }, line: { color: C.lavanda, width: 1 } });
-    s.addText(f.icono || '⚙️', { x: x + 0.32, y: y + 0.28, w: 0.55, h: 0.55, fontFace: FUENTE, fontSize: 20, align: 'center', valign: 'middle', margin: 0 });
-    s.addText(f.titulo, { x: x + 1.02, y: y + 0.22, w: w - 1.35, h: 0.5, fontFace: FUENTE, fontSize: 15, bold: true, color: C.moradoProfundo, valign: 'middle', margin: 0 });
-    const filas = [];
-    (f.cerradas || []).forEach((t) => filas.push({ e: 'ok', t }));
-    (f.enCurso || []).forEach((t) => filas.push({ e: 'curso', t }));
-    (f.detenidas || []).forEach((t) => filas.push({ e: 'stop', t }));
-    let yy = y + 1.02;
-    filas.forEach((r) => {
+    slide.addShape('roundRect', { x, y, w, h: alto, rectRadius: 0.12,
+      fill: { color: C.tinte }, line: { color: C.lavanda, width: 1 } });
+    slide.addShape('ellipse', { x: x + 0.3, y: y + 0.26, w: 0.5, h: 0.5,
+      fill: { color: C.blanco }, line: { color: C.lavanda, width: 1 } });
+    slide.addText(f.icono || '⚙️', { x: x + 0.3, y: y + 0.26, w: 0.5, h: 0.5,
+      fontFace: FUENTE, fontSize: 18, align: 'center', valign: 'middle', margin: 0 });
+
+    const titL = nLineas(f.titulo, wTit, fsTit, true);
+    const hTit = Math.max(0.5, altoTexto(titL, fsTit) + 0.1);
+    slide.addText(f.titulo, { x: x + 0.92, y: y + 0.22, w: wTit, h: hTit,
+      fontFace: FUENTE, fontSize: fsTit, bold: true, color: C.moradoProfundo,
+      valign: 'middle', margin: 0, lineSpacingMultiple: 1.05 });
+
+    let yy = y + 0.26 + Math.max(0.62, hTit + 0.12) + 0.16;
+    filas[i].forEach((r) => {
+      const hr = r.l * lh;
+      if (yy + hr > y + alto - 0.08) return;          // no desbordar la tarjeta
       if (r.e === 'ok') {
-        s.addText('✓', { x: x + 0.34, y: yy, w: 0.3, h: 0.34, fontFace: FUENTE, fontSize: 13, bold: true, color: C.verde, align: 'center', valign: 'middle', margin: 0 });
+        slide.addText('✓', { x: x + 0.32, y: yy, w: 0.28, h: lh, fontFace: FUENTE,
+          fontSize: fs + 1, bold: true, color: C.verde, align: 'center', valign: 'top', margin: 0 });
       } else {
         const col = r.e === 'stop' ? EST.ambar : C.moradoVivo;
-        s.addShape('ellipse', { x: x + 0.42, y: yy + 0.09, w: 0.16, h: 0.16, fill: { color: r.e === 'stop' ? EST.ambar : C.blanco }, line: { color: col, width: 2 } });
+        slide.addShape('ellipse', { x: x + 0.4, y: yy + lh / 2 - 0.08, w: 0.15, h: 0.15,
+          fill: { color: r.e === 'stop' ? EST.ambar : C.blanco }, line: { color: col, width: 2 } });
       }
-      s.addText(r.t, { x: x + 0.72, y: yy, w: w - 1.05, h: 0.5, fontFace: FUENTE, fontSize: 12, color: r.e === 'ok' ? C.cuerpo : C.moradoProfundo, bold: r.e !== 'ok', valign: 'top', margin: 0, lineSpacingMultiple: 1.1 });
-      yy += 0.54;
+      const partes = [{ text: r.texto, options: {} }];
+      if (r.avance != null && r.e !== 'ok') {
+        partes.push({ text: '  ' + r.avance + '%', options: { color: C.tenue, bold: false } });
+      }
+      slide.addText(partes, { x: x + 0.68, y: yy, w: wItem, h: hr + 0.05,
+        fontFace: FUENTE, fontSize: fs, color: r.e === 'ok' ? C.cuerpo : C.moradoProfundo,
+        bold: r.e !== 'ok', valign: 'top', margin: 0, lineSpacingMultiple: 1.06 });
+      yy += hr + 0.14;
     });
   });
-  const ly = y + h + 0.22;
-  s.addText('✓', { x: G.M, y: ly, w: 0.25, h: 0.3, fontFace: FUENTE, fontSize: 12, bold: true, color: C.verde, align: 'center', valign: 'middle', margin: 0 });
-  s.addText('Cerrado en esta quincena', { x: G.M + 0.3, y: ly, w: 2.6, h: 0.3, fontFace: FUENTE, fontSize: 11.5, color: C.tenue, valign: 'middle', margin: 0 });
-  s.addShape('ellipse', { x: G.M + 3.05, y: ly + 0.07, w: 0.16, h: 0.16, fill: { color: C.blanco }, line: { color: C.moradoVivo, width: 2 } });
-  s.addText('En curso', { x: G.M + 3.35, y: ly, w: 1.3, h: 0.3, fontFace: FUENTE, fontSize: 11.5, color: C.tenue, valign: 'middle', margin: 0 });
-  if (hayDet) {
-    s.addShape('ellipse', { x: G.M + 4.75, y: ly + 0.07, w: 0.16, h: 0.16, fill: { color: EST.ambar }, line: { color: EST.ambar, width: 2 } });
-    s.addText('Detenido por un pendiente', { x: G.M + 5.05, y: ly, w: 2.8, h: 0.3, fontFace: FUENTE, fontSize: 11.5, color: C.tenue, valign: 'middle', margin: 0 });
+
+  if (leyenda) {
+    const ly = y + alto + 0.2;
+    const hayDet = frentes.some((f) => (f.detenidas || []).length);
+    slide.addText('✓', { x: G.M, y: ly, w: 0.25, h: 0.28, fontFace: FUENTE, fontSize: 12,
+      bold: true, color: C.verde, align: 'center', valign: 'middle', margin: 0 });
+    slide.addText('Cerrado en esta quincena', { x: G.M + 0.3, y: ly, w: 2.5, h: 0.28,
+      fontFace: FUENTE, fontSize: 11, color: C.tenue, valign: 'middle', margin: 0 });
+    slide.addShape('ellipse', { x: G.M + 2.95, y: ly + 0.07, w: 0.15, h: 0.15,
+      fill: { color: C.blanco }, line: { color: C.moradoVivo, width: 2 } });
+    slide.addText('En curso, con su avance', { x: G.M + 3.22, y: ly, w: 2.4, h: 0.28,
+      fontFace: FUENTE, fontSize: 11, color: C.tenue, valign: 'middle', margin: 0 });
+    if (hayDet) {
+      slide.addShape('ellipse', { x: G.M + 5.75, y: ly + 0.07, w: 0.15, h: 0.15,
+        fill: { color: EST.ambar }, line: { color: EST.ambar, width: 2 } });
+      slide.addText('Detenido por un pendiente', { x: G.M + 6.02, y: ly, w: 2.8, h: 0.28,
+        fontFace: FUENTE, fontSize: 11, color: C.tenue, valign: 'middle', margin: 0 });
+    }
   }
 }
 
-function columnasEstado(s, { izquierda, derecha, y, altoTarjeta = 1.28, gap = 0.16 }) {
-  const anchoT = 5.75, xs = [G.M, 6.85];
+/* ── Columnas de estado, con tarjetas del alto de su contenido ───────── */
+function columnasEstado(slide, { izquierda, derecha, y = 2.55, gap = 0.16, maxAlto = 4.3 }) {
+  const anchoT = 5.75, xs = [G.M, 6.85], wTxt = anchoT - 0.72;
+  const fs = 11.5, fsTit = 13;
+
+  const medir = (col) => (col && col.items ? col.items : []).map((it) => {
+    // Si el detalle repite el título, no lo pintamos dos veces
+    const det = (it.detalle && it.detalle.trim() &&
+      it.detalle.trim().toLowerCase() !== String(it.titulo).trim().toLowerCase()) ? it.detalle : null;
+    const lt = nLineas(it.titulo, wTxt, fsTit, true);
+    const ld = det ? nLineas(det, wTxt, fs, false) : 0;
+    const h = 0.16 + altoTexto(lt, fsTit) + (det ? altoTexto(ld, fs) + 0.06 : 0) +
+              (it.meta ? 0.3 : 0) + 0.16;
+    return { ...it, det, lt, ld, h: Math.max(0.9, h) };
+  });
+
   [izquierda, derecha].forEach((col, ci) => {
     if (!col) return;
     const x = xs[ci];
-    s.addText((col.icono ? col.icono + '  ' : '') + col.titulo, { x, y: y - 0.5, w: anchoT, h: 0.4, fontFace: FUENTE, fontSize: 14.5, bold: true, color: C.moradoProfundo, margin: 0 });
-    const items = col.items || [];
+    slide.addText((col.icono ? col.icono + '  ' : '') + col.titulo, {
+      x, y: y - 0.5, w: anchoT, h: 0.4, fontFace: FUENTE, fontSize: 14.5,
+      bold: true, color: C.moradoProfundo, margin: 0 });
+
+    const items = medir(col);
     if (!items.length) {
-      s.addShape('roundRect', { x, y, w: anchoT, h: 1.0, rectRadius: 0.12, fill: { color: C.tinte }, line: { color: C.lavanda, width: 1 } });
-      s.addText(col.vacio || 'Sin puntos abiertos en este periodo.', { x: x + 0.35, y, w: anchoT - 0.7, h: 1.0, fontFace: FUENTE, fontSize: 12.5, color: C.cuerpo, valign: 'middle', margin: 0 });
+      slide.addShape('roundRect', { x, y, w: anchoT, h: 0.95, rectRadius: 0.12,
+        fill: { color: C.tinte }, line: { color: C.lavanda, width: 1 } });
+      slide.addText(col.vacio || 'Sin puntos abiertos en este periodo.', {
+        x: x + 0.35, y, w: anchoT - 0.7, h: 0.95, fontFace: FUENTE, fontSize: 12.5,
+        color: C.cuerpo, valign: 'middle', margin: 0 });
       return;
     }
-    items.forEach((it, i) => {
-      const yy = y + i * (altoTarjeta + gap);
+
+    let yy = y;
+    items.forEach((it) => {
+      if (yy + it.h > y + maxAlto) return;
       const acento = EST[it.tono] || C.moradoVivo;
-      s.addShape('roundRect', { x, y: yy, w: anchoT, h: altoTarjeta, rectRadius: 0.12, fill: { color: C.tinte }, line: { color: C.lavanda, width: 1 } });
-      s.addShape('roundRect', { x: x + 0.14, y: yy + 0.18, w: 0.09, h: altoTarjeta - 0.36, rectRadius: 0.045, fill: { color: acento }, line: { color: acento, width: 0.5 } });
-      s.addText(it.titulo, { x: x + 0.42, y: yy + 0.14, w: anchoT - 0.72, h: 0.34, fontFace: FUENTE, fontSize: 13, bold: true, color: C.moradoProfundo, valign: 'middle', margin: 0 });
-      if (it.detalle) s.addText(it.detalle, { x: x + 0.42, y: yy + 0.46, w: anchoT - 0.72, h: 0.42, fontFace: FUENTE, fontSize: 11.5, color: C.cuerpo, margin: 0, lineSpacingMultiple: 1.1 });
-      if (it.meta) s.addText(it.meta, { x: x + 0.42, y: yy + altoTarjeta - 0.42, w: anchoT - 0.72, h: 0.32, fontFace: FUENTE, fontSize: 11, bold: true, color: acento === C.moradoVivo ? C.moradoVivo : acento, valign: 'middle', margin: 0 });
+      slide.addShape('roundRect', { x, y: yy, w: anchoT, h: it.h, rectRadius: 0.12,
+        fill: { color: C.tinte }, line: { color: C.lavanda, width: 1 } });
+      slide.addShape('roundRect', { x: x + 0.14, y: yy + 0.14, w: 0.09, h: it.h - 0.28,
+        rectRadius: 0.045, fill: { color: acento }, line: { color: acento, width: 0.5 } });
+
+      let ty = yy + 0.12;
+      slide.addText(it.titulo, { x: x + 0.42, y: ty, w: wTxt, h: altoTexto(it.lt, fsTit) + 0.04,
+        fontFace: FUENTE, fontSize: fsTit, bold: true, color: C.moradoProfundo,
+        valign: 'top', margin: 0, lineSpacingMultiple: 1.06 });
+      ty += altoTexto(it.lt, fsTit) + 0.04;
+
+      if (it.det) {
+        slide.addText(it.det, { x: x + 0.42, y: ty, w: wTxt, h: altoTexto(it.ld, fs) + 0.04,
+          fontFace: FUENTE, fontSize: fs, color: C.cuerpo, valign: 'top', margin: 0,
+          lineSpacingMultiple: 1.06 });
+        ty += altoTexto(it.ld, fs) + 0.06;
+      }
+      if (it.meta) {
+        slide.addText(it.meta, { x: x + 0.42, y: ty, w: wTxt, h: 0.28, fontFace: FUENTE,
+          fontSize: 10.5, bold: true, color: acento === C.moradoVivo ? C.moradoVivo : acento,
+          valign: 'middle', margin: 0 });
+      }
+      yy += it.h + gap;
     });
   });
 }
@@ -212,11 +458,15 @@ function construir(k) {
   });
 
   let s = slideContenido(pres, { eyebrow: 'Dónde vamos', titulo: k.tituloAvance });
-  avanceGlobal(s, { real: k.avanceReal, plan: k.avancePlan, y: 2.95 });
-  if (k.hitos && k.hitos.length) lineaHitos(s, k.hitos, { y: 5.35 });
+  avanceCompacto(s, { real: k.avanceReal, plan: k.avancePlan, y: 2.6 });
+  if (k.gantt && k.gantt.filas && k.gantt.filas.length) {
+    gantt(s, k.gantt, { y: 4.15, alto: 2.7 });
+  } else if (k.hitos && k.hitos.length) {
+    lineaHitos(s, k.hitos, { y: 5.35 });
+  }
 
   s = slideContenido(pres, { eyebrow: 'En qué estamos', titulo: k.tituloActividades });
-  frentesTrabajo(s, k.frentes, { y: 2.5 });
+  frentesTrabajo(s, k.frentes, { y: 2.4 });
 
   s = slideContenido(pres, { eyebrow: 'Qué necesitamos', titulo: k.tituloPendientes });
   columnasEstado(s, {
@@ -240,5 +490,5 @@ function descargar(k) {
   return pres.writeFile({ fileName: k.archivo });
 }
 
-return { construir, descargar, C, EST };
+return { construir, descargar, C, EST, nLineas };
 })();

@@ -146,7 +146,14 @@ const comsDe = (pid, aid) => DB.comentario
 
 const semanaDe = (p, isoStr) => Math.max(0, Math.floor(dias(p.kickoff, isoStr) / 7));
 const semanaActual = (p) => semanaDe(p, hoyISO());
-const semanasTotales = (p) => Math.max(1, Math.ceil(dias(p.kickoff, p.fin) / 7));
+function semanasTotales(p) {
+  let fin = p.fin;
+  if (!fin || fin <= p.kickoff) {
+    const fines = actsDe(p.id).map((a) => a.fin).filter(Boolean).sort();
+    fin = fines[fines.length - 1] || fin;
+  }
+  return fin && fin > p.kickoff ? Math.max(1, Math.ceil(dias(p.kickoff, fin) / 7)) : 0;
+}
 
 /** Comentarios marcados como riesgo y todavía no atendidos. */
 function riesgosDe(pid, aid) {
@@ -163,13 +170,23 @@ function estaDetenida(a) {
 
 function metricas(p) {
   const acts = actsDe(p.id), hoy = hoyISO();
-  const total = acts.reduce((s, a) => s + (+a.horas || 0), 0) || 1;
-  const real = acts.reduce((s, a) => s + (+a.horas || 0) * (+a.avance || 0) / 100, 0);
+  const horas = acts.reduce((s, a) => s + (+a.horas || 0), 0);
+
+  // Si el plan no trae horas, todas las actividades pesan igual. Sin este
+  // respaldo la división queda 0/0 y el tablero reporta 0% teniendo avance.
+  const sinHoras = horas === 0 && acts.length > 0;
+  const peso = (a) => (sinHoras ? 1 : (+a.horas || 0));
+  const total = sinHoras ? acts.length : (horas || 1);
+
+  const conFechas = acts.filter((a) => a.ini && a.fin);
+  const sinFechas = acts.length > 0 && conFechas.length === 0;
+
+  const real = acts.reduce((s, a) => s + peso(a) * (+a.avance || 0) / 100, 0);
   const plan = acts.reduce((s, a) => {
     if (!a.ini || !a.fin) return s;
     const dur = Math.max(1, dias(a.ini, a.fin) + 1);
     const frac = Math.max(0, Math.min(1, (dias(a.ini, hoy) + 1) / dur));
-    return s + (+a.horas || 0) * frac;
+    return s + peso(a) * frac;
   }, 0);
 
   const reqAbiertos = reqsDe(p.id).filter((r) => r.estado !== 'recibido');
@@ -182,13 +199,23 @@ function metricas(p) {
   const pReal = Math.round(real / total * 100), pPlan = Math.round(plan / total * 100);
   const delta = pReal - pPlan;
 
-  let semaforo = 'verde';
-  const vencidoViejo = vencidos.some((r) => dias(r.fecha, hoy) > 14);
-  if (delta < -10 || vencidoViejo) semaforo = 'rojo';
-  else if (delta <= -4 || vencidos.length || detenidas.length || riesgos.length) semaforo = 'ambar';
+  // Sin fechas no hay plan contra el cual comparar. Pintar verde ahí sería
+  // decir "todo bien" precisamente cuando el tablero no sabe nada.
+  const sinPlan = sinFechas || !p.fin || p.fin <= p.kickoff;
+
+  let semaforo;
+  if (sinPlan) {
+    semaforo = 'sin';
+  } else {
+    semaforo = 'verde';
+    const vencidoViejo = vencidos.some((r) => dias(r.fecha, hoy) > 14);
+    if (delta < -10 || vencidoViejo) semaforo = 'rojo';
+    else if (delta <= -4 || vencidos.length || detenidas.length || riesgos.length) semaforo = 'ambar';
+  }
 
   const m = { sem: semanaActual(p), semTot: semanasTotales(p), total, pReal, pPlan, delta,
-              semaforo, reqAbiertos, vencidos, detenidas, riesgos, atrasadas, horasReales: real };
+              semaforo, sinHoras, sinFechas, sinPlan,
+              reqAbiertos, vencidos, detenidas, riesgos, atrasadas, horasReales: real };
   m.estimado = fechaEstimada(p, m);
   m.desvioDias = m.estimado ? dias(p.fin, m.estimado) : null;
   return m;
@@ -202,7 +229,8 @@ function metricas(p) {
  */
 function fechaEstimada(p, m) {
   const hoy = hoyISO();
-  if (!p.fin) return null;
+  if (!p.fin || p.fin <= p.kickoff) return null;       // no hay fecha de cierre real
+  if (m.sinPlan) return null;
   if (m.pReal <= 0 && m.pPlan > 0) return null;        // sin avance capturado, no hay tendencia
   const ritmo = m.pPlan > 0 ? m.pReal / m.pPlan : 1;
   const restantes = Math.max(0, dias(hoy, p.fin));
@@ -243,15 +271,23 @@ function construirCorte(p) {
 
   // Frentes con movimiento en la ventana, máximo 3 y 5 renglones cada uno
   const porHoras = (x, y) => y.horas - x.horas;
+  // El título del frente se acorta: los nombres del plan traen paréntesis
+  // largos que en una tarjeta de tres columnas se comen media tarjeta.
+  const tituloFrente = (n) => {
+    let s = String(n).replace(/\s*\([^)]*\)\s*$/, '').trim();
+    return s.length > 38 ? s.slice(0, 36).trim() + '…' : s;
+  };
   let frentes = (p.frentes || []).map((f) => {
     const propias = acts.filter((a) => a.frente === f.clave);
     return {
-      icono: f.icono, titulo: f.nombre,
-      cerradas: propias.filter((a) => a.avance === 100 && a.fin && a.fin >= desde).sort(porHoras).map((a) => corta(a.nombre)),
-      enCurso: propias.filter((a) => a.avance > 0 && a.avance < 100 && !estaDetenida(a)).sort(porHoras).map((a) => corta(a.nombre)),
+      icono: f.icono, titulo: tituloFrente(f.nombre), clave: f.clave,
+      cerradas: propias.filter((a) => a.avance === 100 && a.fin && a.fin >= desde).sort(porHoras)
+        .map((a) => ({ texto: corta(a.nombre) })),
+      enCurso: propias.filter((a) => a.avance > 0 && a.avance < 100 && !estaDetenida(a)).sort(porHoras)
+        .map((a) => ({ texto: corta(a.nombre), avance: a.avance })),
       detenidas: propias.filter(estaDetenida).sort(porHoras).map((a) => {
         const r = bloqueosDe(a)[0];
-        return corta(a.nombre, 58) + (r ? ': requiere ' + corta(r.titulo, 46) : '');
+        return { texto: corta(a.nombre, 58) + (r ? ': requiere ' + corta(r.titulo, 46) : ''), avance: a.avance };
       }),
     };
   }).filter((f) => f.cerradas.length + f.enCurso.length + f.detenidas.length > 0);
@@ -298,6 +334,31 @@ function construirCorte(p) {
     .sort((a, b) => ((a.ini < b.ini ? -1 : 1) || (b.horas - a.horas)))
     .slice(0, 3).map((a) => corta(a.nombre));
 
+  // Gantt por frente: barra planeada, avance real y dónde debería ir el plan
+  const semTot = m.semTot;
+  const filasGantt = (p.frentes || []).map((f) => {
+    const propias = acts.filter((a) => a.frente === f.clave && a.ini && a.fin);
+    if (!propias.length) return null;
+    const hrs = propias.reduce((s2, a) => s2 + (+a.horas || 0), 0);
+    const peso = (a) => (hrs ? (+a.horas || 0) / hrs : 1 / propias.length);
+    const avance = Math.round(propias.reduce((s2, a) => s2 + peso(a) * a.avance, 0));
+    const plan = Math.round(propias.reduce((s2, a) => {
+      const dur = Math.max(1, dias(a.ini, a.fin) + 1);
+      return s2 + peso(a) * 100 * Math.max(0, Math.min(1, (dias(a.ini, hoy) + 1) / dur));
+    }, 0));
+    const ini = Math.min.apply(null, propias.map((a) => semanaDe(p, a.ini)));
+    const fin = Math.max.apply(null, propias.map((a) => semanaDe(p, a.fin) + 1));
+    return { nombre: tituloFrente(f.nombre), ini, fin, avance, plan };
+  }).filter(Boolean).sort((a, b) => a.ini - b.ini).slice(0, 6);
+
+  const ganttData = filasGantt.length ? {
+    semanas: semTot, semanaActual: m.sem, filas: filasGantt,
+    hitos: (p.hitos || []).map((h) => ({
+      semana: semanaDe(p, h.fecha),
+      cumplido: acts.filter((a) => a.fin && a.fin <= h.fecha).every((a) => a.avance === 100),
+    })),
+  } : null;
+
   const T = {
     verde: 'El proyecto avanza\nconforme al plan',
     ambar: 'El proyecto avanza,\ncon puntos por destrabar',
@@ -309,8 +370,10 @@ function construirCorte(p) {
     proyecto: p.nombre, cliente: p.cliente, contactoCliente: p.contactoCliente || '',
     objetivo: p.objetivo || '',
     semana: m.sem, semanasTotales: m.semTot, periodo,
-    semaforo: m.semaforo, avanceReal: m.pReal, avancePlan: m.pPlan,
-    hitos, frentes,
+    semaforo: m.semaforo === 'sin' ? 'ambar' : m.semaforo,
+    sinPlan: !!m.sinPlan, sinHoras: !!m.sinHoras,
+    avanceReal: m.pReal, avancePlan: m.pPlan,
+    hitos, gantt: ganttData, frentes,
     trabas: trabas.slice(0, 3).map((t) => ({ titulo: t.titulo, detalle: t.detalle, meta: t.meta, tono: t.tono })),
     pendientes, pasos,
     proximaSesion: fechaLarga(p.proximaSesion),
@@ -329,15 +392,19 @@ function construirCorte(p) {
 const $ = (s) => document.querySelector(s);
 const app = () => $('#app');
 
+const acts0 = (p) => actsDe(p.id).length;
 const barra = (pct, plan) => '<div class="barra"><div class="barra-fill" style="width:' + Math.min(pct, 100) + '%"></div>' +
   (plan != null ? '<div class="barra-plan" style="left:' + Math.min(plan, 100) + '%"></div>' : '') + '</div>';
 /** Fechas de cierre al final de la barra: la acordada y la proyectada. */
 function cierres(p, m) {
-  const acordada = '<span class="cierre acordada">Cierre acordado' +
-    '<b>' + fechaFull(p.fin) + '</b></span>';
+  const valida = p.fin && p.fin > p.kickoff;
+  const acordada = '<span class="cierre acordada">Cierre acordado<b>' +
+    (valida ? fechaFull(p.fin) : 'sin definir') + '</b></span>';
   if (!m.estimado) {
+    const motivo = !valida ? 'falta la fecha de cierre'
+      : (m.sinFechas ? 'las actividades no tienen fechas' : 'sin avance capturado');
     return '<div class="cierres">' + acordada +
-      '<span class="cierre sin">Cierre estimado<b>sin avance capturado</b></span></div>';
+      '<span class="cierre sin">Cierre estimado<b>' + motivo + '</b></span></div>';
   }
   const d = m.desvioDias;
   const cls = d <= 0 ? 'ok' : (d <= 7 ? 'alerta' : 'mal');
@@ -353,7 +420,8 @@ function fechaFull(isoStr) {
   return f.getDate() + ' de ' + MESES[f.getMonth()] + ' de ' + f.getFullYear();
 }
 
-const ETIQUETA = { verde: 'En tiempo', ambar: 'Con atención', rojo: 'En riesgo' };
+const ETIQUETA = { verde: 'En tiempo', ambar: 'Con atención', rojo: 'En riesgo',
+                   sin: 'Sin datos de plan' };
 const chipSem = (s) => '<span class="chip chip-' + s + '"><i></i>' + ETIQUETA[s] + '</span>';
 
 /**
@@ -365,6 +433,16 @@ function razonesSemaforo(p, m) {
   const hoy = hoyISO(), r = [];
   const pl = (n, s, pl2) => n + ' ' + (n === 1 ? s : (pl2 || s + 's'));
 
+  if (m.sinPlan) {
+    if (m.sinFechas) r.push({ peso: 'sin', corto: 'Las actividades no tienen fechas' });
+    if (!p.fin || p.fin <= p.kickoff) r.push({ peso: 'sin', corto: 'El proyecto no tiene fecha de cierre' });
+    if (m.sinHoras) r.push({ peso: 'sin', corto: 'El plan no trae horas: todas pesan igual' });
+    r.push({ peso: 'sin', corto: 'No hay plan contra el cual comparar el avance' });
+    return r;
+  }
+  if (m.sinHoras) {
+    r.push({ peso: 'sin', corto: 'El plan no trae horas: todas las actividades pesan igual' });
+  }
   if (m.delta <= -4) {
     r.push({ peso: m.delta < -10 ? 'rojo' : 'ambar',
              corto: 'Avance ' + Math.abs(m.delta) + ' puntos porcentuales abajo del plan' });
@@ -401,6 +479,7 @@ function chipSemDetalle(p, m) {
     ['verde', 'Hasta 3 puntos abajo del plan, sin entregables vencidos, nada detenido y sin riesgos abiertos.'],
     ['ambar', 'De 4 a 10 puntos abajo del plan, o hay un entregable vencido, una actividad detenida o un riesgo abierto.'],
     ['rojo', 'Más de 10 puntos abajo del plan, o un entregable del cliente lleva más de 14 días vencido.'],
+    ['sin', 'Faltan fechas u horas en el plan. Sin eso no hay contra qué comparar, así que no se emite un estatus.'],
   ].map(([c, d]) => '<div class="sem-regla' + (c === m.semaforo ? ' actual' : '') + '">' +
     '<span class="chip chip-' + c + '"><i></i>' + ETIQUETA[c] + '</span>' +
     '<span class="sem-desc">' + d + '</span></div>').join('');
@@ -462,7 +541,7 @@ function renderGeneral() {
       '<h3>' + esc(p.nombre) + '</h3></div>' + chipSem(m.semaforo) + '</div>' +
       '<div class="pct">' + m.pReal + '%<span>de avance</span><span class="plan">plan ' + m.pPlan + '%</span></div>' +
       barra(m.pReal, m.pPlan) +
-      '<div class="semana-linea">Semana ' + m.sem + ' de ' + m.semTot + '</div>' +
+      '<div class="semana-linea">Semana ' + m.sem + (m.semTot ? ' de ' + m.semTot : '') + '</div>' +
       '<div class="card-meta ' + (m.vencidos.length ? 'alerta' : (m.reqAbiertos.length ? '' : 'ok')) + '"><i></i>' +
       (m.vencidos.length ? m.vencidos.length + ' entregable(s) del cliente vencido(s)' :
         (m.reqAbiertos.length ? m.reqAbiertos.length + ' pendiente(s) del cliente' :
@@ -638,8 +717,9 @@ function renderProyecto() {
     (m.delta === 0 ? 'En línea con el plan' : (m.delta > 0 ? m.delta + ' puntos adelante' : Math.abs(m.delta) + ' puntos abajo del plan')) +
     '</span></div>' + barra(m.pReal, m.pPlan) + cierres(p, m) + tiraRazones(p, m) +
     '<div class="meta"><span>Plan a la fecha ' + m.pPlan + '%</span>' +
-    '<span>Semana ' + m.sem + ' de ' + m.semTot + '</span>' +
-    '<span>' + Math.round(m.horasReales) + ' de ' + Math.round(m.total) + ' h del plan</span>' +
+    '<span>Semana ' + m.sem + (m.semTot ? ' de ' + m.semTot : '') + '</span>' +
+    '<span>' + (m.sinHoras ? acts0(p) + ' actividades (plan sin horas)'
+      : Math.round(m.horasReales) + ' de ' + Math.round(m.total) + ' h del plan') + '</span>' +
     '<span>Kickoff ' + fechaCorta(p.kickoff) + '</span>' +
     '<span><button class="link" onclick="formProyectoEditar()">Editar proyecto</button></span></div></div></div>' +
 
@@ -698,7 +778,7 @@ function renderActividades(p) {
         const tarde = a.avance < 100 && a.fin && a.fin < hoy;
         return '<div class="act' + (ries.length ? ' riesgo' : (det ? ' detenida' : (tarde ? ' atrasada' : ''))) +
           '" id="act-' + a.id + '">' +
-          '<button class="palomear' + (a.avance === 100 ? ' on' : '') + '" onclick="ciclar(\'' + a.id + '\')">' +
+          '<button class="palomear av-' + a.avance + '" onclick="ciclar(\'' + a.id + '\')">' +
           (a.avance === 100 ? '✓' : a.avance + '%') + '</button>' +
           '<div class="act-cuerpo"><div class="act-tit">' + esc(a.nombre) +
           (ries.length ? '<span class="badge-riesgo">Riesgo</span>' : '') + '</div>' +
@@ -888,12 +968,33 @@ function renderConfirmar() {
     n('requisito') + ' entregables del cliente · ' + n('hito') + ' hitos</div>' +
     '<div>Kickoff ' + fechaCorta(b.meta.kickoff) +
     (b.desfase ? ' · plan recorrido ' + b.desfase + ' días' : ' · sin desfase respecto al plan') + '</div></div>' +
+    avisoPlan(b) +
     '<p class="nota">Los entregables del cliente salieron de las tareas cuyo único recurso es <b>' +
     esc(b.meta.codigoCliente) + '</b>, y lo que bloquean salió de la columna de predecesoras. ' +
     'Corrige aquí lo que no cuadre; una vez creado el proyecto puedes agregar más entregables a mano.</p>' +
     '<div class="tabla-scroll"><table class="tabla"><thead><tr>' +
     '<th>WBS</th><th>Tarea</th><th>Fechas</th><th>Horas</th><th>Recurso</th><th>Se carga como</th>' +
     '</tr></thead><tbody>' + filas + '</tbody></table></div></div>';
+}
+
+/**
+ * Aviso antes de crear el proyecto. Un plan sin horas o sin fechas se carga
+ * igual, pero el avance y el semáforo quedan a medias — mejor decirlo aquí
+ * que dejar que el tablero reporte 0% con la mitad de las tareas palomeadas.
+ */
+function avisoPlan(b) {
+  const usados = b.items.filter((i) => i.tipo === 'actividad');
+  if (!usados.length) return '';
+  const sinH = usados.filter((i) => !i.horas).length;
+  const sinF = usados.filter((i) => !i.ini || !i.fin).length;
+  const faltas = [];
+  if (sinH === usados.length) faltas.push('<b>ninguna actividad trae horas</b>, así que el avance se calculará dando el mismo peso a todas');
+  else if (sinH) faltas.push('<b>' + sinH + ' de ' + usados.length + ' actividades no traen horas</b> y pesarán cero en el avance');
+  if (sinF === usados.length) faltas.push('<b>ninguna actividad trae fechas</b>, así que no habrá plan a la fecha ni semáforo');
+  else if (sinF) faltas.push('<b>' + sinF + ' de ' + usados.length + ' actividades no traen fechas</b> y no contarán para el plan a la fecha');
+  if (!faltas.length) return '';
+  return '<div class="mal-caja">Revisa la columna de horas y las de fechas en el archivo: ' +
+    faltas.join('; y ') + '. Puedes continuar, pero conviene corregir el plan antes.</div>';
 }
 
 function cambiarTipo(k, tipo) { borrador.items[k].tipo = tipo; render(); }
@@ -1245,7 +1346,6 @@ async function salir() { await pca.logoutPopup(); }
 
 /* ══════════════════════════════════════════════════════════════════════
    8) ARRANQUE EN BLANCO — en modo 'sharepoint' los datos vienen de la lista.
-   Aquí no se guardan datos de clientes: este archivo vive en un repo público.
    ══════════════════════════════════════════════════════════════════════ */
 function semilla() {
   return { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };
