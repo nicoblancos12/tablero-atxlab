@@ -530,7 +530,7 @@ function renderGeneral() {
     '<div class="kpi-val' + (k.clase ? ' ' + k.clase : '') + '">' + k.val + '</div></div>').join('') + '</div>' : '';
 
   const filtro = FILTROS_PROYECTO[vista.filtroProyectos] || FILTROS_PROYECTO.todos;
-  const q = vista.busqueda.trim().toLowerCase();
+  const q = (vista.busqueda || '').trim().toLowerCase();
   const visibles = DB.proyecto.map((p) => ({ p, m: metricas(p) }))
     .filter(({ m }) => filtro.test(m))
     .filter(({ p }) => !q || (p.nombre + ' ' + p.cliente).toLowerCase().indexOf(q) >= 0);
@@ -1183,12 +1183,12 @@ async function reiniciarLocal() {
   if (!confirm('Esto borra los proyectos guardados en este navegador y vuelve a cargar los de ejemplo. ¿Continuar?')) return;
   localStorage.removeItem(LKEY);
   await cargar();
-  vista = { pantalla: 'general', proyecto: null, tab: 'actividades' };
+  Object.assign(vista, { pantalla: 'general', proyecto: null, tab: 'actividades' });
   render();
   aviso('Datos de ejemplo recargados.');
 }
 
-function abrir(id) { vista = { pantalla: 'proyecto', proyecto: id, tab: 'actividades' }; render(); }
+function abrir(id) { Object.assign(vista, { pantalla: 'proyecto', proyecto: id, tab: 'actividades' }); render(); }
 function volver() { vista.pantalla = 'general'; render(); }
 function irEquipo() { vista.pantalla = 'equipo'; render(); }
 function irTab(t) { vista.tab = t; render(); }
