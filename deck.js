@@ -471,7 +471,7 @@ function pendientesCliente(slide, { titulo, items = [], vacio, y = 2.6, maxAlto 
 
   // Con cuatro tarjetas hay que apretar el relleno o la última se sale
   const medir = (pad) => items.map((it) => {
-    const lt = nLineas(it.titulo, wTxt, fsTit, true);
+    const lt = nLineas(it.titulo + (it.etiqueta ? '     ' + it.etiqueta : ''), wTxt, fsTit, true);
     const li = it.impacto ? nLineas(it.impacto, wTxt, fs, true) : 0;
     const h = pad + altoTexto(lt, fsTit) + (it.meta ? 0.27 : 0) +
               (it.impacto ? altoTexto(li, fs) + 0.03 : 0) + pad;
@@ -491,7 +491,13 @@ function pendientesCliente(slide, { titulo, items = [], vacio, y = 2.6, maxAlto 
       rectRadius: 0.05, fill: { color: acento }, line: { color: acento, width: 0.5 } });
 
     let ty = yy + it.pad - 0.04;
-    slide.addText(it.titulo, { x: G.M + 0.46, y: ty, w: wTxt, h: altoTexto(it.lt, fsTit) + 0.04,
+    const partes = [{ text: it.titulo, options: {} }];
+    if (it.etiqueta) {
+      // Quién responde, en la misma línea: la lista mezcla ambos lados.
+      partes.push({ text: '   ' + it.etiqueta.toUpperCase(),
+                    options: { fontSize: 9.5, bold: true, color: C.tenue, charSpacing: 1 } });
+    }
+    slide.addText(partes, { x: G.M + 0.46, y: ty, w: wTxt, h: altoTexto(it.lt, fsTit) + 0.04,
       fontFace: FUENTE, fontSize: fsTit, bold: true, color: C.moradoProfundo,
       valign: 'top', margin: 0, lineSpacingMultiple: 1.06 });
     ty += altoTexto(it.lt, fsTit) + 0.04;
@@ -574,7 +580,7 @@ function construir(k) {
   s = slideContenido(pres, { eyebrow: 'Qué necesitamos', titulo: k.tituloPendientes });
   pendientesCliente(s, {
     items: k.pendientes,
-    vacio: 'Sin pendientes de su lado en las próximas dos semanas.',
+    vacio: 'Sin puntos abiertos en las próximas dos semanas.',
     y: 2.4, maxAlto: 4.5,
   });
 

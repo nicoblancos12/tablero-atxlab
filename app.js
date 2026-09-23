@@ -360,10 +360,36 @@ function construirCorte(p) {
         impacto = 'Sin impacto si se recibe antes del ' + fechaLarga(r.fecha);
         tono = 'verde';
       }
-      return { titulo: r.titulo,
+      return { lado: 'cliente', orden: vencido ? dias(r.fecha, hoy) : -1,
+               titulo: r.titulo,
+               etiqueta: p.cliente,
                meta: (r.responsable || 'Responsable por definir') + ' · comprometido para el ' + fechaLarga(r.fecha),
                impacto, tono };
-    }).slice(0, 4);
+    });
+
+  // Lo atrasado de nuestro lado. Se excluye lo que está detenido esperando al
+  // cliente: eso ya lo representa su pendiente, y listarlo aquí sería contar
+  // el mismo atraso dos veces y cargárselo a quien no le toca.
+  const nuestros = m.atrasadas
+    .filter((a) => bloqueosDe(a).length === 0)
+    .sort((a, b) => dias(b.fin, hoy) - dias(a.fin, hoy))
+    .map((a) => {
+      const d = dias(a.fin, hoy);
+      return { lado: 'atx', orden: d,
+               titulo: corta(a.nombre, 88),
+               etiqueta: 'atxlab',
+               meta: (a.dueno || 'Sin dueño asignado') + ' · debió cerrar el ' + fechaLarga(a.fin),
+               impacto: 'Lleva ' + d + (d === 1 ? ' día' : ' días') + ' de retraso · va al ' + a.avance + '%',
+               tono: d > 7 ? 'rojo' : 'ambar' };
+    });
+
+  // Ordena por gravedad primero: lo que ya detiene trabajo va arriba, y solo
+  // dentro del mismo tono manda la antigüedad. Ordenar solo por días dejaba
+  // fuera del corte lo que más impacto tiene.
+  const grav = { rojo: 0, ambar: 1, verde: 2 };
+  const puntos = pendientes.concat(nuestros)
+    .sort((a, b) => (grav[a.tono] - grav[b.tono]) || (b.orden - a.orden))
+    .slice(0, 4);   // caben cuatro en la slide; más se recortarían en silencio
 
   // Lo que se trabaja en las próximas dos semanas, con dueño y fecha límite
   const pasos = acts
@@ -416,12 +442,12 @@ function construirCorte(p) {
     sinPlan: !!m.sinPlan, sinHoras: !!m.sinHoras,
     avanceReal: m.pReal, avancePlan: m.pPlan,
     hitos, gantt: ganttData, frentes,
-    pendientes, pasos,
+    pendientes: puntos, pasos,
     proximaSesion: fechaLarga(p.proximaSesion),
     contactoAtx: CONTACTO_ATX, contactoCierre: CONTACTO_CIERRE,
     tituloAvance: T[m.semaforo],
     tituloActividades: 'Lo trabajado en estas dos semanas',
-    tituloPendientes: 'Lo que necesitamos de ' + p.cliente,
+    tituloPendientes: 'Puntos abiertos',
     tituloSigue: 'Lo que haremos del ' + fechaLarga(hoy) + '\nal ' + fechaLarga(limite),
     archivo: limpio(p.cliente) + '_' + limpio(p.nombre) + '_Avance_S' + String(m.sem).padStart(2, '0') + '.pptx',
   };
