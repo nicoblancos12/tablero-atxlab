@@ -25,8 +25,7 @@ const CONTACTO_CIERRE = 'Nicolas Blanco  ·  nicolas@atx.mx  ·  +52 241 135 389
 let DB = { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };
 const SPID = {};
 let usuario = null;
-let vista = { pantalla: 'general', proyecto: null, tab: 'actividades', filtro: 'todas',
-              filtroProyectos: 'todos', busqueda: '' };
+let vista = { pantalla: 'general', proyecto: null, tab: 'actividades', filtro: 'todas' };
 let borrador = null;           // plan cargado, esperando confirmación
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -333,38 +332,49 @@ function construirCorte(p) {
     f.cerradas = f.cerradas.slice(0, Math.max(0, cupo));
   });
 
-  // Trabas: requisitos abiertos, priorizando los que ya frenan algo
-  const trabas = m.reqAbiertos.map((r) => {
-    const bloq = acts.filter((a) => (r.bloquea || []).includes(a.id));
-    const frenando = bloq.filter((a) => a.ini && a.ini <= hoy && a.avance < 100);
-    const vencido = r.fecha && r.fecha < hoy;
-    let meta, tono, peso;
-    if (frenando.length && vencido) {
-      const d = dias(r.fecha, hoy);
-      meta = 'Impacto: ' + d + ' días de retraso acumulado en ' + frenando.length + ' actividad' + (frenando.length > 1 ? 'es' : '');
-      tono = d > 7 ? 'rojo' : 'ambar'; peso = 0;
-    } else if (frenando.length) {
-      meta = 'Impacto: detiene ' + frenando.length + ' actividad' + (frenando.length > 1 ? 'es' : '') + ' en curso';
-      tono = 'ambar'; peso = 1;
-    } else if (bloq.length) {
-      meta = 'Impacto: sin impacto si se recibe antes del ' + fechaLarga(r.fecha);
-      tono = 'verde'; peso = 2;
-    } else {
-      meta = 'Comprometido para el ' + fechaLarga(r.fecha);
-      tono = 'verde'; peso = 3;
-    }
-    return { titulo: r.titulo, detalle: r.detalle || '', meta, tono, peso };
-  }).sort((a, b) => a.peso - b.peso);
+  // Pendientes del cliente: SOLO lo que se necesita de aquí a dos semanas
+  // (o lo que ya venció). Lo que hace falta en noviembre no es material para
+  // la sesión de hoy y solo diluye lo urgente.
+  const limite = PlanATX.masDias(hoy, 14);
+  const pendientes = m.reqAbiertos
+    .filter((r) => r.fecha && r.fecha <= limite)
+    .sort((a, b) => (a.fecha < b.fecha ? -1 : 1))
+    .map((r) => {
+      const bloq = acts.filter((a) => (r.bloquea || []).includes(a.id));
+      const frenando = bloq.filter((a) => a.ini && a.ini <= hoy && a.avance < 100);
+      const vencido = r.fecha < hoy;
+      let impacto, tono;
+      if (vencido && frenando.length) {
+        const d = dias(r.fecha, hoy);
+        impacto = 'Vencido hace ' + d + ' días · ' + frenando.length + ' actividad' +
+                  (frenando.length > 1 ? 'es detenidas' : ' detenida') + ' esperándolo';
+        tono = d > 7 ? 'rojo' : 'ambar';
+      } else if (vencido) {
+        impacto = 'Vencido hace ' + dias(r.fecha, hoy) + ' días';
+        tono = 'ambar';
+      } else if (frenando.length) {
+        impacto = 'Detiene ' + frenando.length + ' actividad' +
+                  (frenando.length > 1 ? 'es' : '') + ' si no llega el ' + fechaLarga(r.fecha);
+        tono = 'ambar';
+      } else {
+        impacto = 'Sin impacto si se recibe antes del ' + fechaLarga(r.fecha);
+        tono = 'verde';
+      }
+      return { titulo: r.titulo,
+               meta: (r.responsable || 'Responsable por definir') + ' · comprometido para el ' + fechaLarga(r.fecha),
+               impacto, tono };
+    }).slice(0, 4);
 
-  const pendientes = m.reqAbiertos.slice()
-    .sort((a, b) => ((a.fecha || '9999') < (b.fecha || '9999') ? -1 : 1)).slice(0, 3)
-    .map((r) => ({ titulo: r.titulo, detalle: r.detalle || '',
-                   meta: (r.responsable || 'Por definir') + ' · ' + fechaLarga(r.fecha) }));
-
+  // Lo que se trabaja en las próximas dos semanas, con dueño y fecha límite
   const pasos = acts
-    .filter((a) => a.avance < 100 && a.ini && a.ini <= PlanATX.masDias(hoy, 14))
+    .filter((a) => a.avance < 100 && a.ini && a.ini <= limite)
     .sort((a, b) => ((a.ini < b.ini ? -1 : 1) || (b.horas - a.horas)))
-    .slice(0, 3).map((a) => corta(a.nombre));
+    .slice(0, 4)
+    .map((a) => ({
+      texto: corta(a.nombre, 72),
+      meta: [a.dueno || 'Sin dueño asignado',
+             a.fin ? 'para el ' + fechaLarga(a.fin) : null].filter(Boolean).join('  ·  '),
+    }));
 
   // Gantt por frente: barra planeada, avance real y dónde debería ir el plan
   const semTot = m.semTot;
@@ -406,14 +416,13 @@ function construirCorte(p) {
     sinPlan: !!m.sinPlan, sinHoras: !!m.sinHoras,
     avanceReal: m.pReal, avancePlan: m.pPlan,
     hitos, gantt: ganttData, frentes,
-    trabas: trabas.slice(0, 3).map((t) => ({ titulo: t.titulo, detalle: t.detalle, meta: t.meta, tono: t.tono })),
     pendientes, pasos,
     proximaSesion: fechaLarga(p.proximaSesion),
     contactoAtx: CONTACTO_ATX, contactoCierre: CONTACTO_CIERRE,
     tituloAvance: T[m.semaforo],
     tituloActividades: 'Lo trabajado en estas dos semanas',
-    tituloPendientes: 'Puntos abiertos para avanzar',
-    tituloSigue: 'Lo que sigue\nen las próximas 2 semanas',
+    tituloPendientes: 'Lo que necesitamos de ' + p.cliente,
+    tituloSigue: 'Lo que haremos del ' + fechaLarga(hoy) + '\nal ' + fechaLarga(limite),
     archivo: limpio(p.cliente) + '_' + limpio(p.nombre) + '_Avance_S' + String(m.sem).padStart(2, '0') + '.pptx',
   };
 }
@@ -527,103 +536,32 @@ function chipSemDetalle(p, m) {
 }
 
 function render() {
-  renderSidenav();
   if (vista.pantalla === 'general') return renderGeneral();
   if (vista.pantalla === 'equipo') return renderEquipo();
   if (vista.pantalla === 'confirmar') return renderConfirmar();
   return renderProyecto();
 }
 
-/** Un proyecto se considera entregado cuando su avance real llegó al 100%. */
-const proyectoEntregado = (m) => m.pReal >= 100;
-
-const FILTROS_PROYECTO = {
-  todos:      { etq: 'Proyectos en curso', test: (m) => !proyectoEntregado(m) },
-  entregados: { etq: 'Entregados',         test: (m) => proyectoEntregado(m) },
-  riesgo:     { etq: 'En riesgo',          test: (m) => !proyectoEntregado(m) && m.semaforo === 'rojo' },
-};
-
-function buscar(texto) {
-  vista.busqueda = texto || '';
-  if (vista.pantalla === 'general') renderGeneral();
-}
-function ponerFiltroProyectos(f) {
-  vista.filtroProyectos = f;
-  if (vista.pantalla !== 'general') { vista.pantalla = 'general'; }
-  render();
-}
-
 function renderGeneral() {
-  const conMetricas = DB.proyecto.map((p) => ({ p, m: metricas(p) }));
-  const activos = conMetricas.filter(({ m }) => !proyectoEntregado(m));
-
-  const kpis = [
-    { etq: 'Activos', val: activos.length, clase: 'violet' },
-    { etq: 'En tiempo', val: activos.filter((x) => x.m.semaforo === 'verde').length, clase: 'verde' },
-    { etq: 'En riesgo', val: activos.filter((x) => x.m.semaforo === 'rojo').length, clase: 'rojo' },
-    { etq: 'Entregables vencidos', val: activos.reduce((s, x) => s + x.m.vencidos.length, 0), clase: 'rojo' },
-  ];
-  const kpiStrip = DB.proyecto.length ? '<div class="kpis">' + kpis.map((k) =>
-    '<div class="kpi"><div class="kpi-etq">' + k.etq + '</div>' +
-    '<div class="kpi-val' + (k.clase ? ' ' + k.clase : '') + '">' + k.val + '</div></div>').join('') + '</div>' : '';
-
-  const filtro = FILTROS_PROYECTO[vista.filtroProyectos] || FILTROS_PROYECTO.todos;
-  const q = (vista.busqueda || '').trim().toLowerCase();
-  const visibles = DB.proyecto.map((p) => ({ p, m: metricas(p) }))
-    .filter(({ m }) => filtro.test(m))
-    .filter(({ p }) => !q || (p.nombre + ' ' + p.cliente).toLowerCase().indexOf(q) >= 0);
-
-  const cards = visibles.map(({ p, m }) => {
+  const cards = DB.proyecto.map((p) => {
+    const m = metricas(p);
     return '<div class="card proj" onclick="abrir(\'' + p.id + '\')">' +
       '<div class="card-top"><div><div class="cliente">' + esc(p.cliente) + '</div>' +
       '<h3>' + esc(p.nombre) + '</h3></div>' + chipSem(m.semaforo) + '</div>' +
-      '<div class="pct">' + m.pReal + '%<span>de avance</span><span class="plan">plan ' + m.pPlan + '%</span></div>' +
+      '<div class="pct">' + m.pReal + '%<span> de avance · plan ' + m.pPlan + '%</span></div>' +
       barra(m.pReal, m.pPlan) +
-      '<div class="semana-linea">Semana ' + m.sem + (m.semTot ? ' de ' + m.semTot : '') + '</div>' +
-      '<div class="card-meta ' + (m.vencidos.length ? 'alerta' : (m.reqAbiertos.length ? '' : 'ok')) + '"><i></i>' +
-      (m.vencidos.length ? m.vencidos.length + ' entregable(s) del cliente vencido(s)' :
-        (m.reqAbiertos.length ? m.reqAbiertos.length + ' pendiente(s) del cliente' :
-          'Sin pendientes del cliente')) +
+      '<div class="meta"><span>Semana ' + m.sem + (m.semTot ? ' de ' + m.semTot : '') + '</span>' +
+      (m.vencidos.length ? '<span class="alerta">' + m.vencidos.length + ' entregable(s) del cliente vencido(s)</span>' :
+        (m.reqAbiertos.length ? '<span>' + m.reqAbiertos.length + ' pendiente(s) del cliente</span>' :
+          '<span class="ok">Sin pendientes del cliente</span>')) +
       '</div></div>';
   }).join('');
 
-  const vacioTxt = q ? 'Ningún proyecto coincide con "' + esc(vista.busqueda) + '".'
-    : (vista.filtroProyectos === 'entregados' ? 'Todavía no hay proyectos entregados.'
-    : (vista.filtroProyectos === 'riesgo' ? 'Ningún proyecto está en riesgo ahora mismo.'
-    : 'Todavía no hay proyectos dados de alta.'));
-
-  app().innerHTML = '<div class="head"><h1>' + esc(filtro.etq) + '</h1>' +
+  app().innerHTML = '<div class="head"><h1>Proyectos en curso</h1>' +
     '<div class="acciones">' +
     (CONFIG.backend === 'local' ? '<button class="btn ghost" onclick="reiniciarLocal()">Vaciar datos locales</button>' : '') +
-    '<button class="btn" onclick="formProyecto()">+ Nuevo proyecto</button></div></div>' +
-    kpiStrip +
-    '<div class="grid">' + (cards || '<p class="vacio">' + vacioTxt + '</p>') + '</div>';
-}
-
-/* ── barra lateral ────────────────────────────────────────────────── */
-function renderSidenav() {
-  const el = $('#sidenav');
-  if (!el) return;
-  const metricasTodas = DB.proyecto.map((p) => metricas(p));
-  const nEntregados = metricasTodas.filter(proyectoEntregado).length;
-  const nRiesgo = metricasTodas.filter((m) => m.semaforo === 'rojo').length;
-  const enGeneral = vista.pantalla === 'general';
-
-  const item = (id, icono, etq, count, onclick, activo) =>
-    '<button class="nav-item' + (activo ? ' on' : '') + '" onclick="' + onclick + '">' +
-    '<span class="ic">' + icono + '</span>' + esc(etq) +
-    (count != null ? '<span class="count">' + count + '</span>' : '') + '</button>';
-
-  el.innerHTML =
-    '<div class="grp-label">Proyectos</div>' +
-    item('todos', '▦', 'Proyectos en curso', DB.proyecto.length, "ponerFiltroProyectos('todos')",
-      enGeneral && vista.filtroProyectos === 'todos') +
-    item('entregados', '✓', 'Entregados', nEntregados, "ponerFiltroProyectos('entregados')",
-      enGeneral && vista.filtroProyectos === 'entregados') +
-    item('riesgo', '⚠', 'En riesgo', nRiesgo, "ponerFiltroProyectos('riesgo')",
-      enGeneral && vista.filtroProyectos === 'riesgo') +
-    '<div class="grp-label">Equipo</div>' +
-    item('equipo', '◎', 'Equipo atxlab', DB.persona.length, 'irEquipo()', vista.pantalla === 'equipo');
+    '<button class="btn" onclick="formProyecto()">Nuevo proyecto</button></div></div>' +
+    '<div class="grid">' + (cards || '<p class="vacio">Todavía no hay proyectos dados de alta.</p>') + '</div>';
 }
 
 /**
@@ -1221,12 +1159,12 @@ async function reiniciarLocal() {
   if (!confirm('Esto borra los proyectos guardados en este navegador y vuelve a cargar los de ejemplo. ¿Continuar?')) return;
   localStorage.removeItem(LKEY);
   await cargar();
-  Object.assign(vista, { pantalla: 'general', proyecto: null, tab: 'actividades' });
+  vista = { pantalla: 'general', proyecto: null, tab: 'actividades' };
   render();
   aviso('Datos de ejemplo recargados.');
 }
 
-function abrir(id) { Object.assign(vista, { pantalla: 'proyecto', proyecto: id, tab: 'actividades' }); render(); }
+function abrir(id) { vista = { pantalla: 'proyecto', proyecto: id, tab: 'actividades' }; render(); }
 function volver() { vista.pantalla = 'general'; render(); }
 function irEquipo() { vista.pantalla = 'equipo'; render(); }
 function irTab(t) { vista.tab = t; render(); }
@@ -1311,41 +1249,13 @@ function aviso(t) {
   clearTimeout(aviso._t); aviso._t = setTimeout(() => d.classList.remove('on'), 4000);
 }
 
-/* ── tema claro/oscuro ─────────────────────────────────────────────── */
-function aplicarTema(tema) {
-  document.documentElement.dataset.theme = tema;
-  const btn = $('#temaBtn');
-  if (btn) btn.textContent = tema === 'oscuro' ? '☀' : '☾';
-}
-function alternarTema() {
-  const actual = document.documentElement.dataset.theme === 'oscuro' ? 'oscuro' : 'claro';
-  const nuevo = actual === 'oscuro' ? 'claro' : 'oscuro';
-  try { localStorage.setItem('atxlab-tema', nuevo); } catch (e) {}
-  aplicarTema(nuevo);
-}
-(function iniciarTema() {
-  let tema = 'claro';
-  try {
-    const guardado = localStorage.getItem('atxlab-tema');
-    if (guardado === 'claro' || guardado === 'oscuro') tema = guardado;
-  } catch (e) {}
-  aplicarTema(tema);
-})();
-
 /* ══════════════════════════════════════════════════════════════════════
    7) ARRANQUE
    ══════════════════════════════════════════════════════════════════════ */
-function pintarUsuario(sufijo) {
-  $('#quien').textContent = usuario.nombre + (sufijo || '');
-  const iniciales = usuario.nombre.split(' ').filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
-  const av = $('#avatar');
-  if (av) av.textContent = iniciales;
-}
-
 async function iniciar() {
   if (CONFIG.backend === 'local') {
     usuario = { nombre: 'Nicolas Blanco', correo: '' };
-    pintarUsuario(' · modo local');
+    $('#quien').textContent = usuario.nombre + ' · modo local';
     await cargar(); render();
     return;
   }
@@ -1361,7 +1271,7 @@ async function iniciar() {
   try {
     await cargar();
     $('#gate').style.display = 'none';
-    pintarUsuario();
+    $('#quien').textContent = usuario.nombre;
     render();
     setInterval(async () => {
       if (vista.pantalla === 'general') { await cargar(); render(); }

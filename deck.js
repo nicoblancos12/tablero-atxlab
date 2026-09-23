@@ -443,6 +443,109 @@ function columnasEstado(slide, { izquierda, derecha, y = 2.55, gap = 0.16, maxAl
   });
 }
 
+/* ── Pendientes del cliente: una sola lista a todo lo ancho ──────────── */
+/**
+ * items: [{ titulo, meta, impacto, tono }]
+ *   meta    — responsable y fecha comprometida
+ *   impacto — qué pasa si no llega: retraso acumulado o "sin impacto hasta X"
+ * Una sola columna: tener "lo que nos frena" y "pendientes del cliente" por
+ * separado repetía el mismo renglón dos veces, porque son la misma cosa.
+ */
+function pendientesCliente(slide, { titulo, items = [], vacio, y = 2.6, maxAlto = 4.2 }) {
+  const w = G.ancho, wTxt = w - 0.8, fsTit = 14, fs = 11.5;
+
+  // El encabezado es opcional: si el título de la slide ya lo dice, sobra.
+  if (titulo) {
+    slide.addText('📋  ' + titulo, { x: G.M, y: y - 0.52, w, h: 0.4,
+      fontFace: FUENTE, fontSize: 14.5, bold: true, color: C.moradoProfundo, margin: 0 });
+  }
+
+  if (!items.length) {
+    slide.addShape('roundRect', { x: G.M, y, w, h: 1.0, rectRadius: 0.12,
+      fill: { color: C.tinte }, line: { color: C.lavanda, width: 1 } });
+    slide.addText(vacio || 'Sin pendientes de su lado en las próximas dos semanas.', {
+      x: G.M + 0.4, y, w: wTxt, h: 1.0, fontFace: FUENTE, fontSize: 13,
+      color: C.cuerpo, valign: 'middle', margin: 0 });
+    return;
+  }
+
+  // Con cuatro tarjetas hay que apretar el relleno o la última se sale
+  const medir = (pad) => items.map((it) => {
+    const lt = nLineas(it.titulo, wTxt, fsTit, true);
+    const li = it.impacto ? nLineas(it.impacto, wTxt, fs, true) : 0;
+    const h = pad + altoTexto(lt, fsTit) + (it.meta ? 0.27 : 0) +
+              (it.impacto ? altoTexto(li, fs) + 0.03 : 0) + pad;
+    return { ...it, lt, li, pad, h: Math.max(0.8, h) };
+  });
+  let gap = 0.16, medidos = medir(0.18);
+  const total = (ms, g) => ms.reduce((s, x) => s + x.h, 0) + g * (ms.length - 1);
+  if (total(medidos, gap) > maxAlto) { gap = 0.12; medidos = medir(0.12); }
+
+  let yy = y;
+  medidos.forEach((it) => {
+    if (yy + it.h > y + maxAlto) return;
+    const acento = EST[it.tono] || C.moradoVivo;
+    slide.addShape('roundRect', { x: G.M, y: yy, w, h: it.h, rectRadius: 0.12,
+      fill: { color: C.tinte }, line: { color: C.lavanda, width: 1 } });
+    slide.addShape('roundRect', { x: G.M + 0.16, y: yy + 0.16, w: 0.1, h: it.h - 0.32,
+      rectRadius: 0.05, fill: { color: acento }, line: { color: acento, width: 0.5 } });
+
+    let ty = yy + it.pad - 0.04;
+    slide.addText(it.titulo, { x: G.M + 0.46, y: ty, w: wTxt, h: altoTexto(it.lt, fsTit) + 0.04,
+      fontFace: FUENTE, fontSize: fsTit, bold: true, color: C.moradoProfundo,
+      valign: 'top', margin: 0, lineSpacingMultiple: 1.06 });
+    ty += altoTexto(it.lt, fsTit) + 0.04;
+
+    if (it.meta) {
+      slide.addText(it.meta, { x: G.M + 0.46, y: ty, w: wTxt, h: 0.25,
+        fontFace: FUENTE, fontSize: 11.5, color: C.cuerpo, valign: 'middle', margin: 0 });
+      ty += 0.27;
+    }
+    if (it.impacto) {
+      slide.addText(it.impacto, { x: G.M + 0.46, y: ty, w: wTxt, h: altoTexto(it.li, fs) + 0.04,
+        fontFace: FUENTE, fontSize: fs, bold: true,
+        color: acento === C.moradoVivo ? C.moradoVivo : acento,
+        valign: 'top', margin: 0, lineSpacingMultiple: 1.06 });
+    }
+    yy += it.h + gap;
+  });
+}
+
+/* ── Pasos de las próximas dos semanas, sobre la slide de cierre ─────── */
+/**
+ * pasos: [{ texto, meta }] — meta lleva dueño y fecha límite.
+ * Se dibuja encima de la slide que devuelve `cierre(...)` llamada con
+ * `pasos: []`, para reusar su fondo, título, logo y bloque de contacto.
+ * El bloque del motor usa pasos de una línea y con cuatro tareas largas se
+ * montaba sobre el pie de página.
+ */
+function pasosProximos(slide, pasos = [], { y = 2.95, maxAlto = 3.05 } = {}) {
+  if (!pasos.length) return;
+  const wTxt = 7.4, fs = 13;
+  const medidos = pasos.slice(0, 4).map((p) => {
+    const o = typeof p === 'string' ? { texto: p } : p;
+    const l = nLineas(o.texto, wTxt, fs, false);
+    return { ...o, l, h: altoTexto(l, fs) + (o.meta ? 0.24 : 0) + 0.12 };
+  });
+  const suma = medidos.reduce((s, m) => s + m.h, 0);
+  const gap = Math.max(0.1, Math.min(0.28, (maxAlto - suma) / Math.max(1, medidos.length - 1)));
+
+  let yy = y;
+  medidos.forEach((p, i) => {
+    slide.addShape('ellipse', { x: G.M, y: yy, w: 0.44, h: 0.44, fill: { color: C.moradoVivo } });
+    slide.addText(String(i + 1), { x: G.M, y: yy, w: 0.44, h: 0.44, fontFace: FUENTE,
+      fontSize: 13, bold: true, color: C.blanco, align: 'center', valign: 'middle', margin: 0 });
+    slide.addText(p.texto, { x: G.M + 0.72, y: yy - 0.02, w: wTxt, h: altoTexto(p.l, fs) + 0.06,
+      fontFace: FUENTE, fontSize: fs, color: C.blanco, valign: 'top', margin: 0,
+      lineSpacingMultiple: 1.06 });
+    if (p.meta) {
+      slide.addText(p.meta, { x: G.M + 0.72, y: yy + altoTexto(p.l, fs) + 0.02, w: wTxt, h: 0.24,
+        fontFace: FUENTE, fontSize: 11, color: C.lavanda, valign: 'top', margin: 0 });
+    }
+    yy += p.h + gap;
+  });
+}
+
 /* ── Armado del deck a partir del corte ─────────────────────────────── */
 function construir(k) {
   const pres = new PptxGenJS();
@@ -469,19 +572,18 @@ function construir(k) {
   frentesTrabajo(s, k.frentes, { y: 2.4 });
 
   s = slideContenido(pres, { eyebrow: 'Qué necesitamos', titulo: k.tituloPendientes });
-  columnasEstado(s, {
-    y: 2.55,
-    izquierda: { icono: '⚠️', titulo: 'Lo que nos está frenando', items: k.trabas,
-                 vacio: 'Sin trabas abiertas en este periodo.' },
-    derecha:   { icono: '📋', titulo: 'Pendientes del lado de ' + k.cliente, items: k.pendientes,
-                 vacio: 'Sin pendientes abiertos en este periodo.' },
+  pendientesCliente(s, {
+    items: k.pendientes,
+    vacio: 'Sin pendientes de su lado en las próximas dos semanas.',
+    y: 2.4, maxAlto: 4.5,
   });
 
-  cierre(pres, {
+  const sc = cierre(pres, {
     eyebrow: 'Próximas 2 semanas', titulo: k.tituloSigue,
-    pasos: k.pasos,
+    pasos: [],
     contacto: ['Próxima sesión de avance: ' + k.proximaSesion, k.contactoCierre],
   });
+  pasosProximos(sc, k.pasos, { y: 2.95, maxAlto: 3.05 });
   return pres;
 }
 
