@@ -39,10 +39,12 @@ function leer(buffer) {
   const filas = XLSX.utils.sheet_to_json(wb.Sheets[hoja], { header: 1, raw: true, cellDates: true, defval: null });
 
   // Encabezado del proyecto
+  // El encabezado viene como "CLIENTE | Proyecto" o como "Cliente · Proyecto"
   const a1 = String((filas[0] || [])[0] || '');
-  const partes = a1.split('|').map((s) => s.trim());
-  const cliente = partes[0] || '';
-  const nombre = partes[1] || '';
+  const sep = a1.indexOf('|') >= 0 ? '|' : (a1.indexOf('·') >= 0 ? '·' : null);
+  const trozos = sep ? a1.split(sep).map((s) => s.trim()) : [a1.trim()];
+  const cliente = trozos[0] || '';
+  const nombre = trozos.slice(1).join(' · ') || '';
 
   // Horas totales y fechas del bloque de resumen
   const a3 = String((filas[2] || [])[0] || '');
@@ -101,10 +103,20 @@ function clasificar(plan, { codigoCliente, kickoffReal }) {
   const desfase = (kickoffReal && plan.inicioPlan) ? dias(plan.inicioPlan, kickoffReal) : 0;
   const mover = (d) => (d ? masDias(d, desfase) : '');
 
+  // La columna "Grupo de recurso" se usa de dos maneras según quién arme el
+  // plan: unos ponen códigos (ATX, ARA) y otros ponen nombres de personas
+  // ("Ana Carol · Rodrigo"). Soportamos las dos: lo que no sea un código se
+  // toma como dueño de la tarea.
+  const partes = (g) => String(g || '').split(/[,·;/]| y /).map((s) => s.trim()).filter(Boolean);
+  const esCodigo = (g) => g.length <= 5 && g === g.toUpperCase();
+
   const esCliente = (t) => {
-    const gs = t.grupo.split(',').map((s) => s.trim()).filter(Boolean);
-    return gs.length > 0 && gs.every((g) => g === codigoCliente);
+    const gs = partes(t.grupo);
+    return !!codigoCliente && gs.length > 0 && gs.every((g) => g === codigoCliente);
   };
+  const duenoDe = (t) => partes(t.grupo)
+    .filter((g) => g !== codigoCliente && !esCodigo(g))
+    .join(', ');
   const esEntregable = (t) => /^entregable\s*:/i.test(t.nombre);
 
   // Fases = nivel 1. Cada tarea cuelga de la última fase vista.
@@ -126,7 +138,7 @@ function clasificar(plan, { codigoCliente, kickoffReal }) {
       idPlan: t.id, wbs: t.wbs, nombre: t.nombre.replace(/^entregable\s*:\s*/i, ''),
       frente: faseActual.clave, horas: t.horas, avance: t.avance,
       ini: mover(t.ini), fin: mover(t.fin),
-      preds: t.preds, grupo: t.grupo, tipo,
+      preds: t.preds, grupo: t.grupo, dueno: duenoDe(t), tipo,
     });
   });
 

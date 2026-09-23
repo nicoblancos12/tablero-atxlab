@@ -26,7 +26,8 @@ let DB = { proyecto: [], actividad: [], requisito: [], comentario: [], persona: 
 const SPID = {};
 let usuario = null;
 let vista = { pantalla: 'general', proyecto: null, tab: 'actividades', filtro: 'todas',
-              duenos: [], menuDuenos: false };
+              duenos: [], menuDuenos: false,
+              filtroProyectos: 'todos', busqueda: '' };
 let borrador = null;           // plan cargado, esperando confirmación
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -563,32 +564,244 @@ function chipSemDetalle(p, m) {
 }
 
 function render() {
+  renderSidenav();
   if (vista.pantalla === 'general') return renderGeneral();
   if (vista.pantalla === 'equipo') return renderEquipo();
   if (vista.pantalla === 'confirmar') return renderConfirmar();
   return renderProyecto();
 }
 
+/** Un proyecto se considera entregado cuando su avance real llegó al 100%. */
+// Un proyecto está entregado si alguien lo marcó terminado o si el avance
+// llegó al 100%. Lo segundo lo trajo el rediseño; lo primero es explícito.
+const proyectoEntregado = (m, p) => (p && p.cerrado) || m.pReal >= 100;
+const enPapelera = (p) => !!p.borrado;
+const vivos = () => DB.proyecto.filter((p) => !enPapelera(p));
+
+const FILTROS_PROYECTO = {
+  todos:      { etq: 'Proyectos en curso', test: (m, p) => !proyectoEntregado(m, p) },
+  entregados: { etq: 'Entregados',         test: (m, p) => proyectoEntregado(m, p) },
+  riesgo:     { etq: 'En riesgo',          test: (m, p) => !proyectoEntregado(m, p) && m.semaforo === 'rojo' },
+  papelera:   { etq: 'Papelera',           test: () => true },
+};
+
+function buscar(texto) {
+  vista.busqueda = texto || '';
+  if (vista.pantalla === 'general') renderGeneral();
+}
+function ponerFiltroProyectos(f) {
+  vista.filtroProyectos = f;
+  if (vista.pantalla !== 'general') { vista.pantalla = 'general'; }
+  render();
+}
+
 function renderGeneral() {
-  const cards = DB.proyecto.map((p) => {
-    const m = metricas(p);
+  if (vista.filtroProyectos === 'papelera') return renderPapelera();
+  const conMetricas = vivos().map((p) => ({ p, m: metricas(p) }));
+  const activos = conMetricas.filter(({ p, m }) => !proyectoEntregado(m, p));
+
+  const kpis = [
+    { etq: 'Activos', val: activos.length, clase: 'violet' },
+    { etq: 'En tiempo', val: activos.filter((x) => x.m.semaforo === 'verde').length, clase: 'verde' },
+    { etq: 'En riesgo', val: activos.filter((x) => x.m.semaforo === 'rojo').length, clase: 'rojo' },
+    { etq: 'Entregables vencidos', val: activos.reduce((s, x) => s + x.m.vencidos.length, 0), clase: 'rojo' },
+  ];
+  const kpiStrip = vivos().length ? '<div class="kpis">' + kpis.map((k) =>
+    '<div class="kpi"><div class="kpi-etq">' + k.etq + '</div>' +
+    '<div class="kpi-val' + (k.clase ? ' ' + k.clase : '') + '">' + k.val + '</div></div>').join('') + '</div>' : '';
+
+  const filtro = FILTROS_PROYECTO[vista.filtroProyectos] || FILTROS_PROYECTO.todos;
+  const q = (vista.busqueda || '').trim().toLowerCase();
+  const visibles = vivos().map((p) => ({ p, m: metricas(p) }))
+    .filter(({ p, m }) => filtro.test(m, p))
+    .filter(({ p }) => !q || (p.nombre + ' ' + p.cliente).toLowerCase().indexOf(q) >= 0);
+
+  const cards = visibles.map(({ p, m }) => {
     return '<div class="card proj" onclick="abrir(\'' + p.id + '\')">' +
       '<div class="card-top"><div><div class="cliente">' + esc(p.cliente) + '</div>' +
       '<h3>' + esc(p.nombre) + '</h3></div>' + chipSem(m.semaforo) + '</div>' +
-      '<div class="pct">' + m.pReal + '%<span> de avance · plan ' + m.pPlan + '%</span></div>' +
+      '<div class="pct">' + m.pReal + '%<span>de avance</span><span class="plan">plan ' + m.pPlan + '%</span></div>' +
       barra(m.pReal, m.pPlan) +
-      '<div class="meta"><span>Semana ' + m.sem + (m.semTot ? ' de ' + m.semTot : '') + '</span>' +
-      (m.vencidos.length ? '<span class="alerta">' + m.vencidos.length + ' entregable(s) del cliente vencido(s)</span>' :
-        (m.reqAbiertos.length ? '<span>' + m.reqAbiertos.length + ' pendiente(s) del cliente</span>' :
-          '<span class="ok">Sin pendientes del cliente</span>')) +
+      '<div class="semana-linea">Semana ' + m.sem + (m.semTot ? ' de ' + m.semTot : '') + '</div>' +
+      '<div class="card-meta ' + (m.vencidos.length ? 'alerta' : (m.reqAbiertos.length ? '' : 'ok')) + '"><i></i>' +
+      (m.vencidos.length ? m.vencidos.length + ' entregable(s) del cliente vencido(s)' :
+        (m.reqAbiertos.length ? m.reqAbiertos.length + ' pendiente(s) del cliente' :
+          'Sin pendientes del cliente')) +
       '</div></div>';
   }).join('');
 
-  app().innerHTML = '<div class="head"><h1>Proyectos en curso</h1>' +
+  const vacioTxt = q ? 'Ningún proyecto coincide con "' + esc(vista.busqueda) + '".'
+    : (vista.filtroProyectos === 'entregados' ? 'Todavía no hay proyectos entregados.'
+    : (vista.filtroProyectos === 'riesgo' ? 'Ningún proyecto está en riesgo ahora mismo.'
+    : 'Todavía no hay proyectos dados de alta.'));
+
+  app().innerHTML = '<div class="head"><h1>' + esc(filtro.etq) + '</h1>' +
     '<div class="acciones">' +
     (CONFIG.backend === 'local' ? '<button class="btn ghost" onclick="reiniciarLocal()">Vaciar datos locales</button>' : '') +
-    '<button class="btn" onclick="formProyecto()">Nuevo proyecto</button></div></div>' +
-    '<div class="grid">' + (cards || '<p class="vacio">Todavía no hay proyectos dados de alta.</p>') + '</div>';
+    '<button class="btn" onclick="formProyecto()">+ Nuevo proyecto</button></div></div>' +
+    kpiStrip +
+    '<div class="grid">' + (cards || '<p class="vacio">' + vacioTxt + '</p>') + '</div>';
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   PAPELERA Y CIERRE DE PROYECTO
+   ══════════════════════════════════════════════════════════════════════ */
+
+/** Vista de la papelera: proyectos borrados, con su fecha y qué arrastran. */
+function renderPapelera() {
+  const hoy = hoyISO();
+  const filas = DB.proyecto.filter(enPapelera)
+    .sort((a, b) => (a.borrado < b.borrado ? 1 : -1))
+    .map((p) => {
+      const d = dias(p.borrado, hoy);
+      const na = actsDe(p.id).length, nr = reqsDe(p.id).length;
+      return '<div class="act"><div class="act-cuerpo">' +
+        '<div class="act-tit">' + esc(p.nombre) + ' <span class="pa-tag">' + esc(p.cliente) + '</span></div>' +
+        '<div class="act-meta"><span>Eliminado ' + (d === 0 ? 'hoy' : 'hace ' + d + (d === 1 ? ' día' : ' días')) + '</span>' +
+        '<span>' + na + ' actividades · ' + nr + ' entregables</span></div></div>' +
+        '<button class="btn ghost" onclick="restaurarProyecto(\'' + p.id + '\')">Restaurar</button>' +
+        '<button class="borrar" title="Eliminar definitivamente" onclick="purgarProyecto(\'' + p.id + '\')">×</button></div>';
+    }).join('');
+
+  app().innerHTML = '<div class="head"><h1>Papelera</h1></div>' +
+    '<div class="card"><p class="nota">Los proyectos eliminados se quedan aquí hasta que alguien ' +
+    'los borre a mano. Nada se destruye solo: si fue un error, restaurar lo devuelve completo, ' +
+    'con sus actividades, entregables y comentarios.</p>' +
+    (filas || '<p class="vacio">La papelera está vacía.</p>') + '</div>';
+}
+
+async function borrarProyecto(id) {
+  const p = DB.proyecto.find((x) => x.id === id);
+  if (!p) return;
+  const na = actsDe(p.id).length, nr = reqsDe(p.id).length;
+  if (!confirm('¿Enviar "' + p.nombre + '" a la papelera?\n\n' +
+    'Se ocultará junto con sus ' + na + ' actividades y ' + nr + ' entregables. ' +
+    'No se borra nada: puedes restaurarlo desde la papelera.')) return;
+  p.borrado = hoyISO();
+  await guardar('proyecto', p);
+  vista = { pantalla: 'general', proyecto: null, tab: 'actividades', filtro: 'todas',
+            duenos: [], menuDuenos: false, filtroProyectos: 'todos', busqueda: '' };
+  render();
+  aviso('Proyecto enviado a la papelera.');
+}
+
+async function restaurarProyecto(id) {
+  const p = DB.proyecto.find((x) => x.id === id);
+  delete p.borrado;
+  await guardar('proyecto', p);
+  render();
+  aviso('Proyecto restaurado.');
+}
+
+/** Borrado definitivo: arrastra actividades, entregables y comentarios. */
+async function purgarProyecto(id) {
+  const p = DB.proyecto.find((x) => x.id === id);
+  if (!p) return;
+  const hijos = [].concat(
+    actsDe(p.id).map((x) => ['actividad', x.id]),
+    reqsDe(p.id).map((x) => ['requisito', x.id]),
+    DB.comentario.filter((c) => c.proyecto === p.id).map((x) => ['comentario', x.id]));
+  if (!confirm('Esto elimina "' + p.nombre + '" para siempre, junto con ' + hijos.length +
+    ' registros. No se puede deshacer.\n\n¿Continuar?')) return;
+  for (const [tipo, hid] of hijos) await borrar(tipo, hid);
+  await borrar('proyecto', p.id);
+  render();
+  aviso('Proyecto eliminado definitivamente.');
+}
+
+/** Marcar terminado: confeti y a "Entregados". */
+async function cerrarProyecto(id) {
+  const p = DB.proyecto.find((x) => x.id === id);
+  const m = metricas(p);
+  const abiertos = m.reqAbiertos.length, sinCerrar = actsDe(p.id).filter((a) => a.avance < 100).length;
+  const aviso2 = (sinCerrar || abiertos)
+    ? '\n\nOjo: quedan ' + sinCerrar + ' actividades sin cerrar y ' + abiertos + ' entregables del cliente abiertos.'
+    : '';
+  if (!confirm('¿Marcar "' + p.nombre + '" como terminado?' + aviso2 +
+    '\n\nPasa a Entregados y deja de aparecer en el tablero general.')) return;
+  p.cerrado = hoyISO();
+  await guardar('proyecto', p);
+  confeti();
+  setTimeout(() => {
+    vista.pantalla = 'general'; vista.filtroProyectos = 'entregados'; render();
+  }, 1700);
+}
+
+/**
+ * Envuelve un cambio de avance para detectar el cruce al 100%. El confeti del
+ * botón "Marcar terminado" es explícito; este es el del proyecto que se cierra
+ * por sí solo al palomear la última actividad.
+ */
+async function conCelebracion(pid, accion) {
+  const p = DB.proyecto.find((x) => x.id === pid);
+  const antes = p ? metricas(p).pReal : 100;
+  await accion();
+  if (!p || p.cerrado) return;
+  if (antes < 100 && metricas(p).pReal >= 100) {
+    confeti('¡' + p.nombre + ' al 100%!');
+  }
+}
+
+async function reabrirProyecto(id) {
+  const p = DB.proyecto.find((x) => x.id === id);
+  delete p.cerrado;
+  await guardar('proyecto', p);
+  render();
+  aviso('Proyecto reabierto.');
+}
+
+/** Confeti en CSS puro: sin librerías y se limpia solo. */
+function confeti(mensaje) {
+  const colores = ['#7B2FBE', '#D4A8F0', '#22C55E', '#F59E0B', '#4A1080', '#C084FC'];
+  const capa = document.createElement('div');
+  capa.className = 'confeti';
+  let html = '';
+  for (let i = 0; i < 90; i++) {
+    const izq = Math.random() * 100;
+    const dur = 2.2 + Math.random() * 1.6;
+    const ret = Math.random() * 0.7;
+    const col = colores[i % colores.length];
+    const ancho = 6 + Math.random() * 6;
+    const alto = 9 + Math.random() * 8;
+    const giro = Math.round(Math.random() * 720 - 360);
+    html += '<i style="left:' + izq.toFixed(2) + '%;background:' + col +
+      ';width:' + ancho.toFixed(1) + 'px;height:' + alto.toFixed(1) + 'px;' +
+      'animation-duration:' + dur.toFixed(2) + 's;animation-delay:' + ret.toFixed(2) + 's;' +
+      '--giro:' + giro + 'deg"></i>';
+  }
+  capa.innerHTML = html + '<div class="confeti-msg">' + esc(mensaje || '¡Proyecto entregado!') + '</div>';
+  document.body.appendChild(capa);
+  setTimeout(() => capa.remove(), 4200);
+}
+
+/* ── barra lateral ────────────────────────────────────────────────── */
+function renderSidenav() {
+  const el = $('#sidenav');
+  if (!el) return;
+  const activos = vivos().map((p) => ({ p, m: metricas(p) }));
+  const nEntregados = activos.filter(({ p, m }) => proyectoEntregado(m, p)).length;
+  const nCurso = activos.length - nEntregados;
+  const nRiesgo = activos.filter(({ p, m }) => !proyectoEntregado(m, p) && m.semaforo === 'rojo').length;
+  const nPapelera = DB.proyecto.filter(enPapelera).length;
+  const enGeneral = vista.pantalla === 'general';
+
+  const item = (id, icono, etq, count, onclick, activo) =>
+    '<button class="nav-item' + (activo ? ' on' : '') + '" onclick="' + onclick + '">' +
+    '<span class="ic">' + icono + '</span>' + esc(etq) +
+    (count != null ? '<span class="count">' + count + '</span>' : '') + '</button>';
+
+  el.innerHTML =
+    '<div class="grp-label">Proyectos</div>' +
+    item('todos', '▦', 'Proyectos en curso', nCurso, "ponerFiltroProyectos('todos')",
+      enGeneral && vista.filtroProyectos === 'todos') +
+    item('entregados', '✓', 'Entregados', nEntregados, "ponerFiltroProyectos('entregados')",
+      enGeneral && vista.filtroProyectos === 'entregados') +
+    item('riesgo', '⚠', 'En riesgo', nRiesgo, "ponerFiltroProyectos('riesgo')",
+      enGeneral && vista.filtroProyectos === 'riesgo') +
+    (nPapelera ? item('papelera', '🗑', 'Papelera', nPapelera, "ponerFiltroProyectos('papelera')",
+      enGeneral && vista.filtroProyectos === 'papelera') : '') +
+    '<div class="grp-label">Equipo</div>' +
+    item('equipo', '◎', 'Equipo atxlab', DB.persona.length, 'irEquipo()', vista.pantalla === 'equipo');
 }
 
 /**
@@ -712,8 +925,17 @@ function renderProyecto() {
     '<div class="head"><div><button class="link" onclick="volver()">← Proyectos</button>' +
     '<h1>' + esc(p.nombre) + ' <span class="sub">' + esc(p.cliente) + '</span></h1></div>' +
     '<div class="acciones">' +
+    (p.cerrado
+      ? '<button class="btn ghost" onclick="reabrirProyecto(\'' + p.id + '\')">Reabrir proyecto</button>'
+      : '<button class="btn ghost" onclick="cerrarProyecto(\'' + p.id + '\')">Marcar terminado</button>') +
+    '<button class="btn ghost peligro" onclick="borrarProyecto(\'' + p.id + '\')" title="Enviar a la papelera">Eliminar</button>' +
     '<button class="btn ghost" onclick="copiarCorte()">Copiar corte para Claude</button>' +
     '<button class="btn" onclick="descargarDeck()">Descargar deck</button></div></div>' +
+    (p.cerrado
+      ? '<div class="banda-cerrado">✓ Proyecto entregado el ' + fechaLarga(p.cerrado) + '</div>'
+      : (m.pReal >= 100
+        ? '<div class="banda-cerrado">✓ Todas las actividades están al 100%. Márcalo terminado para dejar constancia de la fecha de entrega.</div>'
+        : '')) +
 
     '<div class="card resumen"><div class="res-izq"><div class="pct grande">' + m.pReal + '%</div>' +
     '<div class="cap">de avance real</div></div><div class="res-der">' +
@@ -929,7 +1151,10 @@ function formProyecto() {
       campo('Cliente', '<input id="fCliente">') +
       campo('Objetivo del proyecto', '<textarea id="fObjetivo" placeholder="Para qué existe el proyecto. Sirve de contexto al redactar los updates."></textarea>') +
       campo('Contacto del cliente', '<input id="fContacto" placeholder="Quién responde por los entregables de su lado">') +
-      campo('Recurso que identifica al cliente en el plan', '<select id="fCodigo"></select>') +
+      campo('¿Qué recurso del plan identifica al cliente?',
+        '<select id="fCodigo"></select><span class="ayuda">Si la columna de recurso trae nombres ' +
+        'de tu equipo en vez de un código del cliente, elige “Ninguno”: esos nombres se cargarán ' +
+        'como dueños de cada tarea.</span>') +
       campo('Fecha real de kickoff', '<input type="date" id="fKickoff" onchange="avisarDesfase()"><span class="ayuda" id="avisoDesfase"></span>') +
       campo('Próxima sesión de avance', '<input type="date" id="fSesion">') +
     '</div>',
@@ -951,8 +1176,12 @@ function leerArchivo() {
       $('#fNombre').value = plan.nombre;
       $('#fCliente').value = plan.cliente;
       $('#fKickoff').value = plan.inicioPlan;
-      $('#fCodigo').innerHTML = plan.codigos.map((c) =>
-        '<option value="' + esc(c) + '"' + (/^atx/i.test(c) ? '' : ' selected') + '>' + esc(c) + '</option>').join('');
+      // Si los recursos parecen nombres de personas, "Ninguno" va por defecto
+      const parecenCodigos = plan.codigos.some((c) => c.length <= 5 && c === c.toUpperCase() && !/^atx/i.test(c));
+      $('#fCodigo').innerHTML =
+        '<option value=""' + (parecenCodigos ? '' : ' selected') + '>Ninguno — el plan no marca entregables del cliente</option>' +
+        plan.codigos.map((c) => '<option value="' + esc(c) + '"' +
+          (parecenCodigos && !/^atx/i.test(c) ? ' selected' : '') + '>' + esc(c) + '</option>').join('');
       avisarDesfase();
     } catch (err) {
       $('#resumenPlan').innerHTML = '<div class="mal-caja">' + esc(err.message) + '</div>';
@@ -1003,7 +1232,7 @@ function renderConfirmar() {
         : '<div class="mini suelto">Las predecesoras no dicen qué bloquea</div>') : '') +
       '</td><td class="nowrap">' + fechaCorta(i.ini) + ' → ' + fechaCorta(i.fin) + '</td>' +
       '<td class="num">' + (i.horas || '') + '</td>' +
-      '<td class="num">' + esc(i.grupo || '—') + '</td>' +
+      '<td class="num">' + esc(i.dueno || i.grupo || '—') + '</td>' +
       '<td><select onchange="cambiarTipo(' + k + ', this.value)">' +
       ['actividad', 'requisito', 'hito', 'ignorar'].map((t) =>
         '<option value="' + t + '"' + (i.tipo === t ? ' selected' : '') + '>' +
@@ -1025,7 +1254,7 @@ function renderConfirmar() {
     esc(b.meta.codigoCliente) + '</b>, y lo que bloquean salió de la columna de predecesoras. ' +
     'Corrige aquí lo que no cuadre; una vez creado el proyecto puedes agregar más entregables a mano.</p>' +
     '<div class="tabla-scroll"><table class="tabla"><thead><tr>' +
-    '<th>WBS</th><th>Tarea</th><th>Fechas</th><th>Horas</th><th>Recurso</th><th>Se carga como</th>' +
+    '<th>WBS</th><th>Tarea</th><th>Fechas</th><th>Horas</th><th>Dueño</th><th>Se carga como</th>' +
     '</tr></thead><tbody>' + filas + '</tbody></table></div></div>';
 }
 
@@ -1060,8 +1289,9 @@ async function crearProyecto() {
 
   const idsNuevos = {};
   const actividades = b.items.filter((i) => i.tipo === 'actividad').map((i) => {
-    const a = { id: uid(), proyecto: P, nombre: i.nombre, frente: i.frente, dueno: '',
-                horas: i.horas, avance: i.avance || 0, ini: i.ini, fin: i.fin };
+    const a = { id: uid(), proyecto: P, nombre: i.nombre, frente: i.frente,
+                dueno: i.dueno || '', horas: i.horas, avance: i.avance || 0,
+                ini: i.ini, fin: i.fin };
     idsNuevos[i.idPlan] = a.id;
     return a;
   });
@@ -1082,11 +1312,23 @@ async function crearProyecto() {
     hitos,
   };
 
-  aviso('Guardando ' + (actividades.length + requisitos.length + 1) + ' registros...');
+  // Alta automática de la gente que venía en el plan, para que aparezca en
+  // el selector de dueños y en Equipo sin capturarla a mano.
+  const nuevas = [];
+  actividades.forEach((a) => {
+    (a.dueno ? a.dueno.split(',') : []).map((s) => s.trim()).filter(Boolean).forEach((n) => {
+      if (!DB.persona.some((q) => q.nombre === n) && !nuevas.some((q) => q.nombre === n)) {
+        nuevas.push({ id: uid(), nombre: n, rol: '', correo: '' });
+      }
+    });
+  });
+
+  aviso('Guardando ' + (actividades.length + requisitos.length + nuevas.length + 1) + ' registros...');
   try {
     await guardarVarios([['proyecto', proyecto]]
       .concat(actividades.map((a) => ['actividad', a]))
-      .concat(requisitos.map((r) => ['requisito', r])));
+      .concat(requisitos.map((r) => ['requisito', r]))
+      .concat(nuevas.map((q) => ['persona', q])));
     borrador = null;
     aviso('Proyecto creado.');
     abrir(P);
@@ -1156,12 +1398,14 @@ function formActividad(id) {
     a ? 'Guardar' : 'Agregar', async () => {
       const nombre = $('#aNombre').value.trim();
       if (!nombre) return aviso('Falta el nombre.');
-      await guardar('actividad', {
-        id: a ? a.id : uid(), proyecto: p.id, nombre, frente: $('#aFrente').value,
-        dueno: $('#aDueno').value, horas: parseFloat($('#aHoras').value) || 0,
-        avance: parseInt($('#aAvance').value, 10), ini: $('#aIni').value, fin: $('#aFin').value,
+      await conCelebracion(p.id, async () => {
+        await guardar('actividad', {
+          id: a ? a.id : uid(), proyecto: p.id, nombre, frente: $('#aFrente').value,
+          dueno: $('#aDueno').value, horas: parseFloat($('#aHoras').value) || 0,
+          avance: parseInt($('#aAvance').value, 10), ini: $('#aIni').value, fin: $('#aFin').value,
+        });
+        cerrarModal(); render();
       });
-      cerrarModal(); render();
     });
 }
 
@@ -1235,22 +1479,31 @@ async function reiniciarLocal() {
   if (!confirm('Esto borra los proyectos guardados en este navegador y vuelve a cargar los de ejemplo. ¿Continuar?')) return;
   localStorage.removeItem(LKEY);
   await cargar();
-  vista = { pantalla: 'general', proyecto: null, tab: 'actividades' };
+  Object.assign(vista, { pantalla: 'general', proyecto: null, tab: 'actividades' });
   render();
   aviso('Datos de ejemplo recargados.');
 }
 
-function abrir(id) { vista = { pantalla: 'proyecto', proyecto: id, tab: 'actividades',
-                              filtro: 'todas', duenos: [], menuDuenos: false }; render(); }
+// Object.assign (no reasignar vista) conserva la búsqueda y el filtro de
+// proyectos de Carol al entrar a un proyecto; los filtros de actividades sí
+// se reinician para no arrastrar una selección de otro proyecto.
+function abrir(id) {
+  Object.assign(vista, { pantalla: 'proyecto', proyecto: id, tab: 'actividades',
+                         filtro: 'todas', duenos: [], menuDuenos: false });
+  render();
+}
 function volver() { vista.pantalla = 'general'; render(); }
 function irEquipo() { vista.pantalla = 'equipo'; render(); }
 function irTab(t) { vista.tab = t; render(); }
 
 async function ciclar(id) {
   const a = DB.actividad.find((x) => x.id === id);
-  const paso = { 0: 25, 25: 50, 50: 75, 75: 100, 100: 0 };
-  a.avance = paso[a.avance] != null ? paso[a.avance] : 25;
-  await guardar('actividad', a); render();
+  await conCelebracion(a.proyecto, async () => {
+    const paso = { 0: 25, 25: 50, 50: 75, 75: 100, 100: 0 };
+    a.avance = paso[a.avance] != null ? paso[a.avance] : 25;
+    await guardar('actividad', a);
+    render();
+  });
 }
 async function toggleReq(id) {
   const r = DB.requisito.find((x) => x.id === id);
@@ -1326,13 +1579,41 @@ function aviso(t) {
   clearTimeout(aviso._t); aviso._t = setTimeout(() => d.classList.remove('on'), 4000);
 }
 
+/* ── tema claro/oscuro ─────────────────────────────────────────────── */
+function aplicarTema(tema) {
+  document.documentElement.dataset.theme = tema;
+  const btn = $('#temaBtn');
+  if (btn) btn.textContent = tema === 'oscuro' ? '☀' : '☾';
+}
+function alternarTema() {
+  const actual = document.documentElement.dataset.theme === 'oscuro' ? 'oscuro' : 'claro';
+  const nuevo = actual === 'oscuro' ? 'claro' : 'oscuro';
+  try { localStorage.setItem('atxlab-tema', nuevo); } catch (e) {}
+  aplicarTema(nuevo);
+}
+(function iniciarTema() {
+  let tema = 'claro';
+  try {
+    const guardado = localStorage.getItem('atxlab-tema');
+    if (guardado === 'claro' || guardado === 'oscuro') tema = guardado;
+  } catch (e) {}
+  aplicarTema(tema);
+})();
+
 /* ══════════════════════════════════════════════════════════════════════
    7) ARRANQUE
    ══════════════════════════════════════════════════════════════════════ */
+function pintarUsuario(sufijo) {
+  $('#quien').textContent = usuario.nombre + (sufijo || '');
+  const iniciales = usuario.nombre.split(' ').filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+  const av = $('#avatar');
+  if (av) av.textContent = iniciales;
+}
+
 async function iniciar() {
   if (CONFIG.backend === 'local') {
     usuario = { nombre: 'Nicolas Blanco', correo: '' };
-    $('#quien').textContent = usuario.nombre + ' · modo local';
+    pintarUsuario(' · modo local');
     await cargar(); render();
     return;
   }
@@ -1348,7 +1629,7 @@ async function iniciar() {
   try {
     await cargar();
     $('#gate').style.display = 'none';
-    $('#quien').textContent = usuario.nombre;
+    pintarUsuario();
     render();
     setInterval(async () => {
       if (vista.pantalla === 'general') { await cargar(); render(); }
