@@ -25,7 +25,8 @@ const CONTACTO_CIERRE = 'Nicolas Blanco  ·  nicolas@atx.mx  ·  +52 241 135 389
 let DB = { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };
 const SPID = {};
 let usuario = null;
-let vista = { pantalla: 'general', proyecto: null, tab: 'actividades', filtro: 'todas', dueno: '' };
+let vista = { pantalla: 'general', proyecto: null, tab: 'actividades', filtro: 'todas',
+              duenos: [], menuDuenos: false };
 let borrador = null;           // plan cargado, esperando confirmación
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -678,7 +679,7 @@ function panelAtencion(p) {
 function irActividad(id) {
   vista.tab = 'actividades';
   vista.filtro = 'todas';
-  vista.dueno = '';          // si no, la actividad puede quedar fuera del filtro
+  vista.duenos = [];         // si no, la actividad puede quedar fuera del filtro
   render();
   resaltar('act-' + id);
 }
@@ -747,56 +748,72 @@ const FILTROS = {
 };
 
 function irTabFiltro(f) {
-  vista.tab = 'actividades'; vista.filtro = f; vista.dueno = ''; render();
+  vista.tab = 'actividades'; vista.filtro = f; vista.duenos = []; render();
   setTimeout(() => {
     const el = document.getElementById('tabbody');
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, 60);
 }
 function ponerFiltro(f) { vista.filtro = f; render(); }
-function ponerDueno(d) { vista.dueno = d; render(); }
+
+/* ── Selector múltiple de dueños ─────────────────────────────────────── */
+function abrirMenuDuenos() { vista.menuDuenos = !vista.menuDuenos; render(); }
+function marcarDueno(d) {
+  const i = vista.duenos.indexOf(d);
+  if (i >= 0) vista.duenos.splice(i, 1); else vista.duenos.push(d);
+  render();
+}
+function limpiarDuenos() { vista.duenos = []; render(); }
 
 function renderActividades(p) {
   const hoy = hoyISO();
   const filtro = FILTROS[vista.filtro] || FILTROS.todas;
   const todas = actsDe(p.id);
 
-  // Los conteos de cada fila se calculan con el otro filtro ya aplicado,
-  // para que el número diga cuántas verías al hacer clic.
-  const delDueno = (a) => !vista.dueno ||
-    (vista.dueno === '(sin)' ? !a.dueno : a.dueno === vista.dueno);
-
-  const barraEstado = '<div class="filtros">' +
-    '<span class="filtros-etq">Estado</span>' + Object.keys(FILTROS).map((k) => {
-      const n = todas.filter(delDueno).filter(FILTROS[k].test).length;
-      if (k !== 'todas' && !n) return '';
-      return '<button class="filtro' + (vista.filtro === k ? ' on' : '') + '" onclick="ponerFiltro(\'' + k + '\')">' +
-        FILTROS[k].etq + '<span>' + n + '</span></button>';
-    }).join('') + '</div>';
+  // El selector de dueños va en la misma fila; los conteos de estado se
+  // calculan con la selección de dueños ya aplicada.
+  const delDueno = (a) => !vista.duenos.length ||
+    vista.duenos.indexOf(a.dueno || '(sin)') >= 0;
 
   const duenos = [];
   todas.forEach((a) => { if (a.dueno && duenos.indexOf(a.dueno) < 0) duenos.push(a.dueno); });
   duenos.sort();
   const haySin = todas.some((a) => !a.dueno);
-  const yo = usuario && duenos.indexOf(usuario.nombre) >= 0 ? usuario.nombre : null;
+  const yo = usuario ? usuario.nombre : null;
 
-  const botonDueno = (valor, etq) => {
+  const etqDueno = vista.duenos.length === 0 ? 'Cualquier dueño'
+    : (vista.duenos.length === 1 ? (vista.duenos[0] === '(sin)' ? 'Sin dueño' : vista.duenos[0])
+    : vista.duenos.length + ' personas');
+
+  const opcion = (valor, etq) => {
     const n = todas.filter(FILTROS[vista.filtro].test)
-      .filter((a) => (valor === '' ? true : (valor === '(sin)' ? !a.dueno : a.dueno === valor))).length;
-    if (valor !== '' && !n) return '';
-    return '<button class="filtro' + (vista.dueno === valor ? ' on' : '') +
-      '" onclick="ponerDueno(\'' + valor.replace(/'/g, "\\'") + '\')">' +
+      .filter((a) => (valor === '(sin)' ? !a.dueno : a.dueno === valor)).length;
+    const on = vista.duenos.indexOf(valor) >= 0;
+    return '<button class="op-dueno' + (on ? ' on' : '') + '" onclick="marcarDueno(\'' +
+      String(valor).replace(/'/g, "\\'") + '\')"><i>' + (on ? '✓' : '') + '</i>' +
       esc(etq) + '<span>' + n + '</span></button>';
   };
 
-  const barraDueno = (duenos.length || haySin) ? '<div class="filtros filtros-dueno">' +
-    '<span class="filtros-etq">Dueño</span>' +
-    botonDueno('', 'Todos') +
-    (yo ? botonDueno(yo, 'Mis actividades') : '') +
-    duenos.filter((d) => d !== yo).map((d) => botonDueno(d, d)).join('') +
-    (haySin ? botonDueno('(sin)', 'Sin dueño') : '') + '</div>' : '';
+  const menu = !vista.menuDuenos ? '' :
+    '<div class="menu-duenos">' +
+    (yo && duenos.indexOf(yo) >= 0 ? opcion(yo, 'Mis actividades') : '') +
+    duenos.filter((d) => d !== yo).map((d) => opcion(d, d)).join('') +
+    (haySin ? opcion('(sin)', 'Sin dueño') : '') +
+    (vista.duenos.length ? '<button class="op-limpiar" onclick="limpiarDuenos()">Quitar selección</button>' : '') +
+    '</div>';
 
-  const barraFiltros = barraEstado + barraDueno;
+  const selectorDuenos = (duenos.length || haySin) ?
+    '<span class="dueno-wrap">' +
+    '<button class="filtro sel' + (vista.duenos.length ? ' on' : '') +
+    (vista.menuDuenos ? ' abierto' : '') + '" onclick="abrirMenuDuenos()">' +
+    esc(etqDueno) + '<b>▾</b></button>' + menu + '</span>' : '';
+
+  const barraFiltros = '<div class="filtros">' + Object.keys(FILTROS).map((k) => {
+      const n = todas.filter(delDueno).filter(FILTROS[k].test).length;
+      if (k !== 'todas' && !n) return '';
+      return '<button class="filtro' + (vista.filtro === k ? ' on' : '') + '" onclick="ponerFiltro(\'' + k + '\')">' +
+        FILTROS[k].etq + '<span>' + n + '</span></button>';
+    }).join('') + selectorDuenos + '</div>';
 
   const bloques = (p.frentes || []).map((f) => {
     const acts = actsDe(p.id).filter((a) => a.frente === f.clave)
@@ -1223,7 +1240,8 @@ async function reiniciarLocal() {
   aviso('Datos de ejemplo recargados.');
 }
 
-function abrir(id) { vista = { pantalla: 'proyecto', proyecto: id, tab: 'actividades', filtro: 'todas', dueno: '' }; render(); }
+function abrir(id) { vista = { pantalla: 'proyecto', proyecto: id, tab: 'actividades',
+                              filtro: 'todas', duenos: [], menuDuenos: false }; render(); }
 function volver() { vista.pantalla = 'general'; render(); }
 function irEquipo() { vista.pantalla = 'equipo'; render(); }
 function irTab(t) { vista.tab = t; render(); }
@@ -1359,4 +1377,11 @@ function semilla() {
   return { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };
 }
 
-window.addEventListener('DOMContentLoaded', iniciar);
+window.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('click', (e) => {
+    if (vista.menuDuenos && e.target.closest && !e.target.closest('.dueno-wrap')) {
+      vista.menuDuenos = false; render();
+    }
+  });
+  iniciar();
+});
