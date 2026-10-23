@@ -566,6 +566,7 @@ function chipSemDetalle(p, m) {
 function render() {
   renderSidenav();
   if (vista.pantalla === 'general') return renderGeneral();
+  if (vista.pantalla === 'midia') return renderMiDia();
   if (vista.pantalla === 'equipo') return renderEquipo();
   if (vista.pantalla === 'confirmar') return renderConfirmar();
   return renderProyecto();
@@ -783,6 +784,7 @@ function renderSidenav() {
   const nCurso = activos.length - nEntregados;
   const nRiesgo = activos.filter(({ p, m }) => !proyectoEntregado(m, p) && m.semaforo === 'rojo').length;
   const nPapelera = DB.proyecto.filter(enPapelera).length;
+  const nMiDia = pendientesDe(quienMiDia()).length;
   const enGeneral = vista.pantalla === 'general';
 
   const item = (id, icono, etq, count, onclick, activo) =>
@@ -800,6 +802,8 @@ function renderSidenav() {
       enGeneral && vista.filtroProyectos === 'riesgo') +
     (nPapelera ? item('papelera', '🗑', 'Papelera', nPapelera, "ponerFiltroProyectos('papelera')",
       enGeneral && vista.filtroProyectos === 'papelera') : '') +
+    '<div class="grp-label">Mi trabajo</div>' +
+    item('midia', '☀', 'Mi día', nMiDia, 'irMiDia()', vista.pantalla === 'midia') +
     '<div class="grp-label">Equipo</div>' +
     item('equipo', '◎', 'Equipo atxlab', DB.persona.length, 'irEquipo()', vista.pantalla === 'equipo');
 }
@@ -1135,6 +1139,181 @@ function renderEquipo() {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+   4.5) MI DÍA — las actividades de UNA persona, de todos los proyectos
+   Nace de un problema real: estando en varios proyectos a la vez, revisarlos
+   uno por uno para saber qué toca hoy es impráctico. Esta vista cruza los
+   proyectos y agrupa por tiempo, no por proyecto.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * El mismo humano está escrito de varias formas en los planes ("Ana Carol" y
+ * "Ana Carol Peña" son la misma persona). Los planes los sube cada quien, así
+ * que esto va a seguir pasando. Unificamos al LEER y no tocamos el dato en
+ * SharePoint: si mañana alguien corrige el plan, esta tabla deja de aplicar
+ * sin romper nada.
+ */
+const ALIAS = {
+  'ana carol': 'Ana Carol Peña',
+  'rodrigo': 'Rodrigo Vidal',
+  'elian': 'Elian Ramírez',
+  'nico': 'Nicolas Blanco',
+  'alex huerta': 'José Alejandro Huerta Cote',
+};
+const canon = (n) => {
+  const t = String(n || '').trim();
+  return ALIAS[t.toLowerCase()] || t;
+};
+
+/** El campo dueño admite varias personas separadas por coma. */
+const duenosDe = (a) => (a.dueno ? String(a.dueno).split(',') : [])
+  .map((s) => canon(s)).filter(Boolean);
+
+/** Nombres canónicos que aparecen como dueños en proyectos vivos. */
+function personasConCarga() {
+  const vivosIds = vivos().map((p) => p.id);
+  const set = {};
+  DB.actividad.forEach((a) => {
+    if (vivosIds.indexOf(a.proyecto) < 0) return;
+    duenosDe(a).forEach((d) => { set[d] = true; });
+  });
+  DB.persona.forEach((q) => { const c = canon(q.nombre); if (set[c] === undefined) set[c] = set[c] || false; });
+  return Object.keys(set).sort();
+}
+
+/** Actividades abiertas de una persona, solo de proyectos vivos. */
+function pendientesDe(nombre) {
+  const vivosIds = vivos().map((p) => p.id);
+  return DB.actividad
+    .filter((a) => a.avance < 100 &&
+                   vivosIds.indexOf(a.proyecto) >= 0 &&
+                   duenosDe(a).indexOf(nombre) >= 0)
+    .sort((x, y) => ((x.fin || '9999') < (y.fin || '9999') ? -1 : 1));
+}
+
+/**
+ * A quién le toca esta vista: la persona elegida, o yo si no hay elección.
+ * El nombre de Entra ID no siempre es idéntico al del plan (puede traer un
+ * segundo apellido). Si no hay calce exacto se intenta por las dos primeras
+ * palabras; si tampoco, se deja elegir a mano en vez de mostrar vacío.
+ */
+function quienMiDia() {
+  if (vista.miDiaQuien) return vista.miDiaQuien;
+  const gente = personasConCarga();
+  if (!usuario) return gente[0] || '';
+  const yo = canon(usuario.nombre);
+  if (gente.indexOf(yo) >= 0) return yo;
+  const corto = yo.split(' ').filter(Boolean).slice(0, 2).join(' ').toLowerCase();
+  const parecido = gente.find((g) => {
+    const gl = g.toLowerCase();
+    return gl.indexOf(corto) === 0 || corto.indexOf(gl.split(' ').slice(0, 2).join(' ')) === 0;
+  });
+  return parecido || gente[0] || '';
+}
+
+function irMiDia() { vista.pantalla = 'midia'; render(); }
+function miDiaPersona(n) { vista.miDiaQuien = n; render(); }
+
+/** Una actividad en la lista de Mi día: igual que en el proyecto, pero
+    diciendo de qué proyecto viene (aquí eso es la información que falta). */
+function lineaMiDia(a, hoy) {
+  const p = DB.proyecto.find((x) => x.id === a.proyecto);
+  const det = estaDetenida(a), bloq = bloqueosDe(a);
+  const tarde = a.fin && a.fin < hoy;
+  const otros = duenosDe(a).filter((d) => d !== quienMiDia());
+  return '<div class="act' + (det ? ' detenida' : (tarde ? ' atrasada' : '')) + '">' +
+    '<button class="palomear av-' + a.avance + '" onclick="ciclar(\'' + a.id + '\')" ' +
+    'title="Avanzar esta actividad">' + (a.avance === 100 ? '✓' : a.avance + '%') + '</button>' +
+    '<div class="act-cuerpo"><div class="act-tit">' + esc(a.nombre) + '</div>' +
+    '<div class="act-meta">' +
+    '<button class="chip-proy" onclick="abrir(\'' + a.proyecto + '\')" ' +
+    'title="Abrir el proyecto">' + esc(p ? p.nombre : 'proyecto borrado') + '</button>' +
+    '<span' + (tarde ? ' class="tarde"' : '') + '>' +
+    (a.fin ? 'cierra ' + fechaCorta(a.fin) : 'sin fecha de cierre') +
+    (tarde ? ' · ' + dias(a.fin, hoy) + ' días tarde' : '') + '</span>' +
+    (a.horas ? '<span>' + a.horas + ' h</span>' : '') +
+    (otros.length ? '<span class="con-quien">con ' + esc(otros.join(', ')) + '</span>' : '') +
+    (det ? '<span class="badge-stop">Detenida: ' + esc(bloq.map((r) => r.titulo).join(', ')) + '</span>' : '') +
+    '</div></div>' +
+    '<button class="coment" onclick="irActividadDe(\'' + a.proyecto + '\',\'' + a.id + '\')" ' +
+    'title="Ver en su proyecto">→</button></div>';
+}
+
+function renderMiDia() {
+  const hoy = hoyISO();
+  const quien = quienMiDia();
+  const gente = personasConCarga();
+  const pend = pendientesDe(quien);
+
+  // Los cortes son por urgencia, no por proyecto: es lo que se pregunta uno
+  // al abrir el tablero en la mañana.
+  const limite7 = PlanATX.masDias(hoy, 7);
+  const atrasadas = pend.filter((a) => a.fin && a.fin < hoy);
+  const hoyMismo  = pend.filter((a) => a.fin === hoy);
+  const semana    = pend.filter((a) => a.fin && a.fin > hoy && a.fin <= limite7);
+  const despues   = pend.filter((a) => a.fin && a.fin > limite7);
+  const sinFecha  = pend.filter((a) => !a.fin);
+  const detenidas = pend.filter((a) => estaDetenida(a));
+
+  const nProy = {};
+  pend.forEach((a) => { nProy[a.proyecto] = true; });
+  const horas = pend.reduce((s, a) => s + (+a.horas || 0), 0);
+
+  const selector = gente.length > 1
+    ? '<div class="midia-gente">' + gente.map((n) => {
+        const c = pendientesDe(n).length;
+        return '<button class="chip-persona' + (n === quien ? ' on' : '') + '" ' +
+          'onclick="miDiaPersona(\'' + esc(n).replace(/'/g, "\\'") + '\')">' + esc(n) +
+          '<span class="c">' + c + '</span></button>';
+      }).join('') + '</div>'
+    : '';
+
+  const tile = (etq, valor, nota, clase) =>
+    '<div class="midia-tile' + (clase ? ' ' + clase : '') + '"><div class="t-etq">' + esc(etq) +
+    '</div><div class="t-val">' + valor + '</div>' +
+    (nota ? '<div class="t-nota">' + esc(nota) + '</div>' : '') + '</div>';
+
+  const resumen = '<div class="midia-tiles">' +
+    tile('Pendientes', pend.length, 'en ' + Object.keys(nProy).length + ' proyecto' +
+      (Object.keys(nProy).length === 1 ? '' : 's')) +
+    tile('Atrasadas', atrasadas.length,
+      atrasadas.length ? 'la más vieja: ' + fechaCorta(atrasadas[0].fin) : 'nada vencido',
+      atrasadas.length ? 'rojo' : '') +
+    tile('Cierran esta semana', hoyMismo.length + semana.length, 'hasta ' + fechaCorta(limite7),
+      (hoyMismo.length + semana.length) ? 'ambar' : '') +
+    tile('Detenidas', detenidas.length, detenidas.length ? 'esperan algo del cliente' : 'ninguna trabada',
+      detenidas.length ? 'ambar' : '') +
+    tile('Horas de plan', horas, 'suma de lo pendiente') +
+    '</div>';
+
+  const bloque = (titulo, nota, acts, clase) => !acts.length ? '' :
+    '<div class="midia-bloque' + (clase ? ' ' + clase : '') + '">' +
+    '<h4 class="midia-h">' + esc(titulo) + '<span class="n">' + acts.length + '</span></h4>' +
+    (nota ? '<p class="midia-nota">' + esc(nota) + '</p>' : '') +
+    acts.map((a) => lineaMiDia(a, hoy)).join('') + '</div>';
+
+  const cuerpo = !pend.length
+    ? '<p class="vacio">' + (quien ? esc(quien) + ' no tiene actividades abiertas en los proyectos en curso.'
+        : 'Elige a una persona para ver sus actividades.') + '</p>'
+    : bloque('Atrasado', 'Debió cerrar antes de hoy y sigue abierto.', atrasadas, 'rojo') +
+      bloque('Cierra hoy', '', hoyMismo, 'ambar') +
+      bloque('Esta semana', 'Cierran dentro de los próximos 7 días.', semana) +
+      bloque('Detenidas', 'Esperan un entregable del cliente: avanzar depende de alguien más.',
+        detenidas.filter((a) => atrasadas.indexOf(a) < 0 && hoyMismo.indexOf(a) < 0 &&
+                                semana.indexOf(a) < 0)) +
+      bloque('Más adelante', '', despues) +
+      bloque('Sin fecha de cierre', 'Nadie les puso fecha, así que no entran en ninguna semana.', sinFecha);
+
+  app().innerHTML =
+    '<div class="head"><div><button class="link" onclick="volver()">← Proyectos</button>' +
+    '<h1>Mi día</h1>' +
+    '<p class="sub-h1">' + (quien ? esc(quien) : 'sin persona') +
+    ' · todas tus actividades abiertas, de todos los proyectos en curso, ordenadas por urgencia.</p>' +
+    '</div></div>' +
+    selector + resumen +
+    '<div class="card">' + cuerpo + '</div>';
+}
+
+/* ══════════════════════════════════════════════════════════════════════
    5) ALTA DE PROYECTO DESDE EL PLAN DE TRABAJO
    ══════════════════════════════════════════════════════════════════════ */
 const campo = (etq, ctrl) => '<label class="campo"><span>' + etq + '</span>' + ctrl + '</label>';
@@ -1142,9 +1321,11 @@ const campo = (etq, ctrl) => '<label class="campo"><span>' + etq + '</span>' + c
 function formProyecto() {
   borrador = null;
   modal('Nuevo proyecto',
-    '<p class="nota">Sube el plan de trabajo en el formato de ATX. De ahí leo el cliente, las fases, ' +
-    'las tareas con horas y fechas, los entregables del cliente y las dependencias.</p>' +
-    campo('Plan de trabajo (.xlsx)', '<input type="file" id="fArchivo" accept=".xlsx,.xlsm" onchange="leerArchivo()">') +
+    '<p class="nota">Sube el plan de trabajo. Si trae el formato de ATX leo el cliente, las fases, ' +
+    'las tareas con horas y fechas, los entregables y las dependencias. Si viene en otro formato ' +
+    'deduzco las columnas y te muestro qué entendí para que lo confirmes.</p>' +
+    campo('Plan de trabajo (.xlsx, .xls o .csv)',
+      '<input type="file" id="fArchivo" accept=".xlsx,.xlsm,.xls,.csv,.tsv,.txt" onchange="leerArchivo()">') +
     '<div id="resumenPlan"></div>' +
     '<div id="camposProyecto" style="display:none">' +
       campo('Nombre del proyecto', '<input id="fNombre">') +
@@ -1161,28 +1342,22 @@ function formProyecto() {
     'Revisar el plan →', prepararConfirmacion);
 }
 
+const CAMPOS_ETQ = {
+  nombre: 'Actividad', wbs: 'WBS / clave', id: 'ID', avance: 'Avance',
+  horas: 'Horas', ini: 'Inicio', fin: 'Fin', dueno: 'Dueño',
+  preds: 'Depende de', agrupa: 'Agrupa por',
+};
+// El archivo se guarda para poder releerlo si la persona corrige el mapeo.
+let bufferPlan = null;
+
 function leerArchivo() {
   const f = $('#fArchivo').files[0];
   if (!f) return;
   const lector = new FileReader();
   lector.onload = (e) => {
+    bufferPlan = new Uint8Array(e.target.result);
     try {
-      const plan = PlanATX.leer(new Uint8Array(e.target.result));
-      borrador = { plan };
-      $('#resumenPlan').innerHTML = '<div class="ok-caja">Leí <b>' + plan.tareas.length + ' tareas</b>. ' +
-        'El plan corre del ' + fechaCorta(plan.inicioPlan) + ' al ' + fechaCorta(plan.finPlan) +
-        (plan.horasEncabezado ? ' · ' + plan.horasEncabezado + ' horas' : '') + '.</div>';
-      $('#camposProyecto').style.display = 'block';
-      $('#fNombre').value = plan.nombre;
-      $('#fCliente').value = plan.cliente;
-      $('#fKickoff').value = plan.inicioPlan;
-      // Si los recursos parecen nombres de personas, "Ninguno" va por defecto
-      const parecenCodigos = plan.codigos.some((c) => c.length <= 5 && c === c.toUpperCase() && !/^atx/i.test(c));
-      $('#fCodigo').innerHTML =
-        '<option value=""' + (parecenCodigos ? '' : ' selected') + '>Ninguno — el plan no marca entregables del cliente</option>' +
-        plan.codigos.map((c) => '<option value="' + esc(c) + '"' +
-          (parecenCodigos && !/^atx/i.test(c) ? ' selected' : '') + '>' + esc(c) + '</option>').join('');
-      avisarDesfase();
+      aplicarPlanLeido(PlanATX.leerAuto(bufferPlan));
     } catch (err) {
       $('#resumenPlan').innerHTML = '<div class="mal-caja">' + esc(err.message) + '</div>';
       $('#camposProyecto').style.display = 'none';
@@ -1190,6 +1365,117 @@ function leerArchivo() {
     }
   };
   lector.readAsArrayBuffer(f);
+}
+
+/** Pinta el resultado de la lectura y, si hubo que deducir, cómo se dedujo. */
+function aplicarPlanLeido(plan) {
+  borrador = { plan };
+  const L = plan.lectura || {};
+  const sinFecha = plan.tareas.filter((t) => !t.fin).length;
+
+  const resumen = '<div class="' + (L.estricto ? 'ok-caja' : 'aviso-caja') + '">' +
+    'Leí <b>' + plan.tareas.length + ' tareas</b>' +
+    (L.estricto ? '' : ' de la hoja <b>' + esc(L.hoja) + '</b>') + '. ' +
+    (plan.inicioPlan ? 'El plan corre del ' + fechaCorta(plan.inicioPlan) + ' al ' + fechaCorta(plan.finPlan) + '.'
+                     : 'El archivo no trae fechas: las actividades quedarán sin calendario.') +
+    (plan.horasEncabezado ? ' · ' + plan.horasEncabezado + ' horas' : '') +
+    (sinFecha && plan.inicioPlan ? ' <b>' + sinFecha + '</b> sin fecha de fin.' : '') +
+    '</div>' + (L.estricto ? '' : panelMapeo(L, plan));
+
+  $('#resumenPlan').innerHTML = resumen;
+  $('#camposProyecto').style.display = 'block';
+  $('#fNombre').value = plan.nombre || '';
+  $('#fCliente').value = plan.cliente || '';
+  $('#fKickoff').value = plan.inicioPlan || hoyISO();
+
+  const parecenCodigos = plan.codigos.some((c) => c.length <= 5 && c === c.toUpperCase() && !/^atx/i.test(c));
+  $('#fCodigo').innerHTML =
+    '<option value=""' + (parecenCodigos ? '' : ' selected') + '>Ninguno — el plan no marca entregables del cliente</option>' +
+    plan.codigos.map((c) => '<option value="' + esc(c) + '"' +
+      (parecenCodigos && !/^atx/i.test(c) ? ' selected' : '') + '>' + esc(c) + '</option>').join('');
+  avisarDesfase();
+}
+
+/**
+ * El panel es la parte importante del modo flexible: enseña de qué columna
+ * salió cada campo para que se pueda corregir ANTES de crear el proyecto.
+ * Adivinar en silencio sería peor que rechazar el archivo.
+ */
+function panelMapeo(L, plan) {
+  const enc = L.encabezados || [];
+  const ancho = L.columnas || enc.length;
+  const opciones = (sel) => {
+    let o = '<option value="">— ninguna —</option>';
+    for (let c = 0; c < ancho; c++) {
+      const etq = (enc[c] || '').trim() || 'columna ' + (c + 1);
+      o += '<option value="' + c + '"' + (sel === c ? ' selected' : '') + '>' +
+        esc(etq.slice(0, 40)) + '</option>';
+    }
+    return o;
+  };
+  const orden = ['nombre', 'dueno', 'ini', 'fin', 'horas', 'avance', 'agrupa', 'wbs', 'preds'];
+  const filas = orden.map((campo) => {
+    const col = L.mapa[campo];
+    const n = (L.llenas || {})[campo];
+    const total = (L.llenas || {}).__filas || plan.tareas.length;
+    const falta = col != null && n != null && n < total;
+    return '<tr><th>' + esc(CAMPOS_ETQ[campo] || campo) + '</th>' +
+      '<td><select data-campo="' + campo + '" onchange="recorregirMapeo()">' + opciones(col) + '</select></td>' +
+      '<td class="dato">' + (col == null ? '<span class="sin">sin detectar</span>'
+        : (falta ? '<span class="parcial">' + n + ' de ' + total + '</span>'
+                 : '<span class="bien">' + (n == null ? total : n) + ' filas</span>')) + '</td></tr>';
+  }).join('');
+
+  const hojas = (L.hojas || []).length > 1
+    ? '<label class="mapeo-hoja">Hoja: <select id="mapeoHoja" onchange="recorregirMapeo()">' +
+      L.hojas.map((h) => '<option' + (h === L.hoja ? ' selected' : '') + '>' + esc(h) + '</option>').join('') +
+      '</select></label>' : '';
+
+  const avisos = (L.avisos || []).length
+    ? '<p class="mapeo-aviso">Descarté: ' +
+      L.avisos.map((a) => '<b>' + esc(CAMPOS_ETQ[a.campo] || a.campo) + '</b> (' + esc(a.motivo) + ')').join(' · ') +
+      '</p>' : '';
+
+  return '<details class="mapeo" open><summary>Este archivo no trae la plantilla de ATX: deduje las columnas. ' +
+    '<b>Revísalas</b></summary>' +
+    '<p class="mapeo-nota">Encabezados en la fila ' + L.filaEncabezados + '. ' +
+    'Si algo quedó en la columna equivocada, cámbialo aquí.</p>' + hojas +
+    '<table class="mapeo-tabla"><thead><tr><th>Campo</th><th>Columna del archivo</th><th>Con dato</th></tr></thead>' +
+    '<tbody>' + filas + '</tbody></table>' + avisos +
+    '<input type="hidden" id="mapeoFila" value="' + L.filaEncabezados + '">' +
+    '<div class="mapeo-prev">' + previaTareas(plan) + '</div></details>';
+}
+
+/** Tres primeras tareas ya interpretadas: el mejor control de calidad. */
+function previaTareas(plan) {
+  const t = plan.tareas.filter((x) => x.nivel !== 1).slice(0, 3);
+  if (!t.length) return '';
+  return '<div class="prev-tit">Así quedarían las primeras:</div>' + t.map((x) =>
+    '<div class="prev-fila"><b>' + esc(x.nombre.trim().slice(0, 70)) + '</b>' +
+    '<span>' + (x.dueno || x.grupo ? esc(x.grupo || x.dueno) + ' · ' : '') +
+    (x.fin ? 'cierra ' + fechaCorta(x.fin) : 'sin fecha') +
+    (x.horas ? ' · ' + x.horas + ' h' : '') + '</span></div>').join('');
+}
+
+/** Relee el archivo con lo que la persona corrigió en el panel. */
+function recorregirMapeo() {
+  if (!bufferPlan) return;
+  const mapa = {};
+  document.querySelectorAll('.mapeo-tabla select[data-campo]').forEach((s) => {
+    if (s.value !== '') mapa[s.dataset.campo] = +s.value;
+  });
+  if (mapa.nombre == null) {
+    aviso('Elige al menos la columna de la actividad.');
+    return;
+  }
+  const hojaSel = $('#mapeoHoja');
+  const hoja = hojaSel ? hojaSel.value : (borrador.plan.lectura || {}).hoja;
+  const fila = +($('#mapeoFila') ? $('#mapeoFila').value : 1);
+  try {
+    aplicarPlanLeido(PlanATX.releerCon(bufferPlan, hoja, fila, mapa));
+  } catch (err) {
+    aviso('No pude releer con esas columnas: ' + err.message);
+  }
 }
 
 function avisarDesfase() {
@@ -1493,6 +1779,12 @@ function abrir(id) {
   render();
 }
 function volver() { vista.pantalla = 'general'; render(); }
+
+/** Desde Mi día: abre el proyecto y deja resaltada la actividad. */
+function irActividadDe(pid, aid) {
+  abrir(pid);
+  resaltar('act-' + aid);
+}
 function irEquipo() { vista.pantalla = 'equipo'; render(); }
 function irTab(t) { vista.tab = t; render(); }
 
@@ -1632,7 +1924,7 @@ async function iniciar() {
     pintarUsuario();
     render();
     setInterval(async () => {
-      if (vista.pantalla === 'general') { await cargar(); render(); }
+      if (vista.pantalla === 'general' || vista.pantalla === 'midia') { await cargar(); render(); }
     }, CONFIG.pollSeconds * 1000);
   } catch (e) { mostrarGate('permisos', e.message); }
 }
