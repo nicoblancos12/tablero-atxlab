@@ -11,6 +11,7 @@ const CONFIG = {
   siteHost: 'atx1.sharepoint.com',
   sitePath: '/sites/atxlabProyectos',
   listName: 'Tablero atxlab',
+  listaProductos: 'Tablero atxlab productos',   // lista aparte para el backlog de productos (no se mezcla con proyectos)
   // SharePoint reserva el nombre "Tipo" para una columna del sistema, así que
   // la nuestra se llama TipoReg. Al leer se aceptan variantes por si la lista
   // se creó con otro nombre.
@@ -22,8 +23,9 @@ const CONFIG = {
 const CONTACTO_ATX = 'Nicolas Blanco  ·  AI Solutions Architect  ·  nicolas@atx.mx  ·  atxlab.ai';
 const CONTACTO_CIERRE = 'Nicolas Blanco  ·  nicolas@atx.mx  ·  +52 241 135 3897  ·  atxlab.ai';
 
-let DB = { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };
+let DB = { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [], producto: [], tarea: [] };
 const SPID = {};
+let PROD_ERROR = '';   // si no se pudo leer listProducts, el tablero de proyectos sigue funcionando
 let usuario = null;
 let vista = { pantalla: 'general', proyecto: null, tab: 'actividades', filtro: 'todas',
               duenos: [], menuDuenos: false,
@@ -52,7 +54,10 @@ function fechaCorta(isoStr) {
    1) PERSISTENCIA
    ══════════════════════════════════════════════════════════════════════ */
 const LKEY = 'atxlab-tablero-v3';
-let pca = null, siteId = null, listId = null;
+let pca = null, siteId = null;
+const LISTAS = {};                                  // nombre de la lista -> id
+const TIPOS_PROD = ['producto', 'tarea'];           // viven en listProducts; el resto, en la lista de proyectos
+const nombreListaDe = (tipo) => (TIPOS_PROD.indexOf(tipo) >= 0 ? CONFIG.listaProductos : CONFIG.listName);
 
 async function token() {
   const cuenta = pca.getAllAccounts()[0];
@@ -71,26 +76,31 @@ async function graph(url, opts = {}) {
   return r.status === 204 ? null : r.json();
 }
 
-async function resolverLista() {
-  if (listId) return;
-  const site = await graph('/sites/' + CONFIG.siteHost + ':' + CONFIG.sitePath);
-  siteId = site.id;
+async function resolverLista(tipo) {
+  const nombre = nombreListaDe(tipo);
+  if (LISTAS[nombre]) return LISTAS[nombre];
+  if (!siteId) siteId = (await graph('/sites/' + CONFIG.siteHost + ':' + CONFIG.sitePath)).id;
   const listas = await graph('/sites/' + siteId + '/lists?$select=id,name,displayName');
-  const l = listas.value.find((x) => x.displayName === CONFIG.listName || x.name === CONFIG.listName);
-  if (!l) throw new Error('No encontré la lista "' + CONFIG.listName + '" en el sitio.');
-  listId = l.id;
+  const l = listas.value.find((x) => x.displayName === nombre || x.name === nombre);
+  if (!l) throw new Error('No encontré la lista "' + nombre + '" en el sitio.');
+  LISTAS[nombre] = l.id;
+  return l.id;
 }
 
-async function cargar() {
-  if (CONFIG.backend === 'local') {
-    const raw = localStorage.getItem(LKEY);
-    DB = raw ? JSON.parse(raw) : semilla();
-    if (!raw) localStorage.setItem(LKEY, JSON.stringify(DB));
-    return;
+const COLUMNAS = {};   // id de lista -> { nombreInterno: true }
+async function columnasDe(listId) {
+  if (!COLUMNAS[listId]) {
+    const r = await graph('/sites/' + siteId + '/lists/' + listId + '/columns?$select=name,readOnly&$top=200');
+    COLUMNAS[listId] = {};
+    r.value.forEach((c) => { if (!c.readOnly) COLUMNAS[listId][c.name] = true; });
   }
-  await resolverLista();
-  const nuevo = { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };
-  let url = '/sites/' + siteId + '/lists/' + listId + '/items?expand=fields&$top=500';
+  return COLUMNAS[listId];
+}
+
+/** Lee todos los ítems de una lista y los acomoda en `nuevo` según su tipo. */
+async function leerLista(tipoRef, nuevo) {
+  const id = await resolverLista(tipoRef);
+  let url = '/sites/' + siteId + '/lists/' + id + '/items?expand=fields&$top=500';
   while (url) {
     const r = await graph(url);
     r.value.forEach((it) => {
@@ -104,7 +114,39 @@ async function cargar() {
     });
     url = r['@odata.nextLink'] || null;
   }
+}
+
+async function cargar() {
+  if (CONFIG.backend === 'local') {
+    const raw = localStorage.getItem(LKEY);
+    DB = raw ? JSON.parse(raw) : semilla();
+    // Datos guardados antes de que existieran los productos no traen estas colecciones.
+    DB.producto = DB.producto || []; DB.tarea = DB.tarea || [];
+    if (!raw) localStorage.setItem(LKEY, JSON.stringify(DB));
+    return;
+  }
+  const nuevo = semilla();
+  await leerLista('proyecto', nuevo);
+  // Si listProducts no existe o no se puede leer, los proyectos no se ven afectados.
+  PROD_ERROR = '';
+  try { await leerLista('producto', nuevo); }
+  catch (e) { PROD_ERROR = e.message; console.warn('Productos no disponibles:', e.message); }
   DB = nuevo;
+}
+
+/** Columnas reales de listProducts (además de Datos, que guarda el registro completo). */
+function camposProductos(tipo, obj) {
+  const iso = (d) => (d ? d + 'T12:00:00Z' : null);
+  if (tipo === 'producto') {
+    return { Title: obj.nombre, Producto: obj.nombre, Estado: obj.archivado ? 'archivado' : 'activo' };
+  }
+  const p = DB.producto.find((x) => x.id === obj.producto);
+  return {
+    Title: obj.titulo, Producto: p ? p.nombre : '', Estado: obj.estado, Prioridad: obj.prioridad,
+    TipoTarea: obj.tipo, Area: obj.area, Dueno: obj.dueno || '', Descripcion: obj.descripcion || '',
+    FechaInicio: iso(obj.ini), FechaEntrega: iso(obj.fin), Horas: obj.horas == null ? null : obj.horas,
+    Avance: obj.avance || 0, Posicion: obj.pos == null ? null : obj.pos,
+  };
 }
 
 async function guardar(tipo, obj) {
@@ -112,8 +154,18 @@ async function guardar(tipo, obj) {
   const i = lista.findIndex((x) => x.id === obj.id);
   if (i >= 0) lista[i] = obj; else lista.push(obj);
   if (CONFIG.backend === 'local') { localStorage.setItem(LKEY, JSON.stringify(DB)); return; }
-  await resolverLista();
-  const fields = { Title: (obj.titulo || obj.nombre || tipo).slice(0, 200), Ref: obj.id, Datos: JSON.stringify(obj) };
+  const listId = await resolverLista(tipo);
+  let fields = TIPOS_PROD.indexOf(tipo) >= 0
+    ? camposProductos(tipo, obj)
+    : { Title: (obj.titulo || obj.nombre || tipo).slice(0, 200) };
+  // En listProducts solo se escriben las columnas que existen: la lista funciona con TipoReg, Ref y Datos,
+  // y cada columna que se agregue después empieza a llenarse sola.
+  if (TIPOS_PROD.indexOf(tipo) >= 0) {
+    const reales = await columnasDe(listId);
+    fields = Object.keys(fields).reduce((o, k) => { if (reales[k]) o[k] = fields[k]; return o; }, {});
+  }
+  fields.Title = String(fields.Title || tipo).slice(0, 200);
+  fields.Ref = obj.id; fields.Datos = JSON.stringify(obj);
   fields[CONFIG.campoTipo] = tipo;
   if (SPID[obj.id]) {
     await graph('/sites/' + siteId + '/lists/' + listId + '/items/' + SPID[obj.id] + '/fields',
@@ -131,6 +183,7 @@ async function borrar(tipo, id) {
   DB[tipo] = DB[tipo].filter((x) => x.id !== id);
   if (CONFIG.backend === 'local') { localStorage.setItem(LKEY, JSON.stringify(DB)); return; }
   if (SPID[id]) {
+    const listId = await resolverLista(tipo);
     await graph('/sites/' + siteId + '/lists/' + listId + '/items/' + SPID[id], { method: 'DELETE' });
     delete SPID[id];
   }
@@ -568,6 +621,7 @@ function render() {
   if (vista.pantalla === 'general') return renderGeneral();
   if (vista.pantalla === 'midia') return renderMiDia();
   if (vista.pantalla === 'equipo') return renderEquipo();
+  if (vista.pantalla === 'producto') return renderProducto();   // productos.js
   if (vista.pantalla === 'confirmar') return renderConfirmar();
   return renderProyecto();
 }
@@ -802,6 +856,7 @@ function renderSidenav() {
       enGeneral && vista.filtroProyectos === 'riesgo') +
     (nPapelera ? item('papelera', '🗑', 'Papelera', nPapelera, "ponerFiltroProyectos('papelera')",
       enGeneral && vista.filtroProyectos === 'papelera') : '') +
+    sidenavProductos() +   // productos.js
     '<div class="grp-label">Mi trabajo</div>' +
     item('midia', '☀', 'Mi día', nMiDia, 'irMiDia()', vista.pantalla === 'midia') +
     '<div class="grp-label">Equipo</div>' +
@@ -1176,17 +1231,19 @@ function personasConCarga() {
     if (vivosIds.indexOf(a.proyecto) < 0) return;
     duenosDe(a).forEach((d) => { set[d] = true; });
   });
+  tareasAsignadasA().forEach((a) => { set[canon(a.dueno)] = true; });   // productos.js
   DB.persona.forEach((q) => { const c = canon(q.nombre); if (set[c] === undefined) set[c] = set[c] || false; });
   return Object.keys(set).sort();
 }
 
-/** Actividades abiertas de una persona, solo de proyectos vivos. */
+/** Actividades abiertas de una persona: proyectos vivos y tareas de productos que tiene asignadas. */
 function pendientesDe(nombre) {
   const vivosIds = vivos().map((p) => p.id);
   return DB.actividad
     .filter((a) => a.avance < 100 &&
                    vivosIds.indexOf(a.proyecto) >= 0 &&
                    duenosDe(a).indexOf(nombre) >= 0)
+    .concat(tareasAsignadasA().filter((a) => canon(a.dueno) === nombre))   // productos.js
     .sort((x, y) => ((x.fin || '9999') < (y.fin || '9999') ? -1 : 1));
 }
 
@@ -1216,6 +1273,7 @@ function miDiaPersona(n) { vista.miDiaQuien = n; render(); }
 /** Una actividad en la lista de Mi día: igual que en el proyecto, pero
     diciendo de qué proyecto viene (aquí eso es la información que falta). */
 function lineaMiDia(a, hoy) {
+  if (a.esProducto) return lineaMiDiaProducto(a, hoy);   // productos.js
   const p = DB.proyecto.find((x) => x.id === a.proyecto);
   const det = estaDetenida(a), bloq = bloqueosDe(a);
   const tarde = a.fin && a.fin < hoy;
@@ -1255,7 +1313,8 @@ function renderMiDia() {
   const detenidas = pend.filter((a) => estaDetenida(a));
 
   const nProy = {};
-  pend.forEach((a) => { nProy[a.proyecto] = true; });
+  let nProd = 0;
+  pend.forEach((a) => { if (a.esProducto) nProd++; else nProy[a.proyecto] = true; });
   const horas = pend.reduce((s, a) => s + (+a.horas || 0), 0);
 
   const selector = gente.length > 1
@@ -1273,8 +1332,10 @@ function renderMiDia() {
     (nota ? '<div class="t-nota">' + esc(nota) + '</div>' : '') + '</div>';
 
   const resumen = '<div class="midia-tiles">' +
-    tile('Pendientes', pend.length, 'en ' + Object.keys(nProy).length + ' proyecto' +
-      (Object.keys(nProy).length === 1 ? '' : 's')) +
+    tile('Pendientes', pend.length, [
+      Object.keys(nProy).length ? Object.keys(nProy).length + ' proyecto' + (Object.keys(nProy).length === 1 ? '' : 's') : '',
+      nProd ? nProd + ' tarea' + (nProd === 1 ? '' : 's') + ' de producto' : '',
+    ].filter(Boolean).join(' y ') || 'nada pendiente') +
     tile('Atrasadas', atrasadas.length,
       atrasadas.length ? 'la más vieja: ' + fechaCorta(atrasadas[0].fin) : 'nada vencido',
       atrasadas.length ? 'rojo' : '') +
@@ -1292,7 +1353,7 @@ function renderMiDia() {
     acts.map((a) => lineaMiDia(a, hoy)).join('') + '</div>';
 
   const cuerpo = !pend.length
-    ? '<p class="vacio">' + (quien ? esc(quien) + ' no tiene actividades abiertas en los proyectos en curso.'
+    ? '<p class="vacio">' + (quien ? esc(quien) + ' no tiene actividades abiertas en los proyectos en curso ni en productos.'
         : 'Elige a una persona para ver sus actividades.') + '</p>'
     : bloque('Atrasado', 'Debió cerrar antes de hoy y sigue abierto.', atrasadas, 'rojo') +
       bloque('Cierra hoy', '', hoyMismo, 'ambar') +
@@ -1307,7 +1368,7 @@ function renderMiDia() {
     '<div class="head"><div><button class="link" onclick="volver()">← Proyectos</button>' +
     '<h1>Mi día</h1>' +
     '<p class="sub-h1">' + (quien ? esc(quien) : 'sin persona') +
-    ' · todas tus actividades abiertas, de todos los proyectos en curso, ordenadas por urgencia.</p>' +
+    ' · todas tus actividades abiertas, de los proyectos en curso y de los productos, ordenadas por urgencia.</p>' +
     '</div></div>' +
     selector + resumen +
     '<div class="card">' + cuerpo + '</div>';
@@ -1924,7 +1985,7 @@ async function iniciar() {
     pintarUsuario();
     render();
     setInterval(async () => {
-      if (vista.pantalla === 'general' || vista.pantalla === 'midia') { await cargar(); render(); }
+      if (vista.pantalla === 'general' || vista.pantalla === 'midia' || (vista.pantalla === 'producto' && productoLibreParaRefrescar())) { await cargar(); render(); }
     }, CONFIG.pollSeconds * 1000);
   } catch (e) { mostrarGate('permisos', e.message); }
 }
@@ -1947,7 +2008,7 @@ async function salir() { await pca.logoutPopup(); }
    8) ARRANQUE EN BLANCO — en modo 'sharepoint' los datos vienen de la lista.
    ══════════════════════════════════════════════════════════════════════ */
 function semilla() {
-  return { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [] };
+  return { proyecto: [], actividad: [], requisito: [], comentario: [], persona: [], producto: [], tarea: [] };
 }
 
 window.addEventListener('DOMContentLoaded', () => {
