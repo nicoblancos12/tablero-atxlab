@@ -87,12 +87,15 @@ async function resolverLista(tipo) {
   return l.id;
 }
 
-const COLUMNAS = {};   // id de lista -> { nombreInterno: true }
+const COLUMNAS = {};   // id de lista -> { nombre visible o interno: nombre interno }
 async function columnasDe(listId) {
   if (!COLUMNAS[listId]) {
-    const r = await graph('/sites/' + siteId + '/lists/' + listId + '/columns?$select=name,readOnly&$top=200');
-    COLUMNAS[listId] = {};
-    r.value.forEach((c) => { if (!c.readOnly) COLUMNAS[listId][c.name] = true; });
+    const r = await graph('/sites/' + siteId + '/lists/' + listId + '/columns?$select=name,displayName,readOnly&$top=200');
+    const m = {};
+    // Al importar una lista desde Excel o crearla a mano, el nombre interno puede no coincidir con el visible
+    // (por ejemplo "Ref0"). Se acepta cualquiera de los dos y se escribe siempre con el interno.
+    r.value.forEach((c) => { if (!c.readOnly) { if (c.displayName && !m[c.displayName]) m[c.displayName] = c.name; m[c.name] = c.name; } });
+    COLUMNAS[listId] = m;
   }
   return COLUMNAS[listId];
 }
@@ -100,15 +103,17 @@ async function columnasDe(listId) {
 /** Lee todos los ítems de una lista y los acomoda en `nuevo` según su tipo. */
 async function leerLista(tipoRef, nuevo) {
   const id = await resolverLista(tipoRef);
+  const cols = TIPOS_PROD.indexOf(tipoRef) >= 0 ? await columnasDe(id) : {};
+  const cDatos = cols.Datos || 'Datos', cTipo = cols[CONFIG.campoTipo] || CONFIG.campoTipo;
   let url = '/sites/' + siteId + '/lists/' + id + '/items?expand=fields&$top=500';
   while (url) {
     const r = await graph(url);
     r.value.forEach((it) => {
       const f = it.fields || {};
-      const tipo = f[CONFIG.campoTipo] || f.TipoReg || f.Tipo || f.Tipo0 || f.TipoRegistro;
-      if (!tipo || !f.Datos) return;
+      const tipo = f[cTipo] || f.TipoReg || f.Tipo || f.Tipo0 || f.TipoRegistro;
+      if (!tipo || !f[cDatos]) return;
       try {
-        const d = JSON.parse(f.Datos);
+        const d = JSON.parse(f[cDatos]);
         if (nuevo[tipo]) { nuevo[tipo].push(d); SPID[d.id] = it.id; }
       } catch (e) { console.warn('registro ilegible', it.id); }
     });
@@ -160,13 +165,18 @@ async function guardar(tipo, obj) {
     : { Title: (obj.titulo || obj.nombre || tipo).slice(0, 200) };
   // En listProducts solo se escriben las columnas que existen: la lista funciona con TipoReg, Ref y Datos,
   // y cada columna que se agregue después empieza a llenarse sola.
-  if (TIPOS_PROD.indexOf(tipo) >= 0) {
-    const reales = await columnasDe(listId);
-    fields = Object.keys(fields).reduce((o, k) => { if (reales[k]) o[k] = fields[k]; return o; }, {});
-  }
   fields.Title = String(fields.Title || tipo).slice(0, 200);
   fields.Ref = obj.id; fields.Datos = JSON.stringify(obj);
   fields[CONFIG.campoTipo] = tipo;
+  if (TIPOS_PROD.indexOf(tipo) >= 0) {
+    const reales = await columnasDe(listId);
+    const faltan = ['Ref', 'Datos', CONFIG.campoTipo].filter((k) => !reales[k]);
+    if (faltan.length) {
+      throw new Error('A la lista "' + nombreListaDe(tipo) + '" le faltan las columnas ' + faltan.join(', ') +
+        '. Columnas que encuentro: ' + Object.keys(reales).join(', '));
+    }
+    fields = Object.keys(fields).reduce((o, k) => { if (reales[k]) o[reales[k]] = fields[k]; return o; }, {});
+  }
   if (SPID[obj.id]) {
     await graph('/sites/' + siteId + '/lists/' + listId + '/items/' + SPID[obj.id] + '/fields',
       { method: 'PATCH', body: JSON.stringify(fields) });
