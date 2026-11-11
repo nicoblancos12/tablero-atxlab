@@ -117,14 +117,39 @@ function sidenavProductos() {
   const item = (p) => '<button class="nav-item' + (vista.pantalla === 'producto' && vista.producto === p.id ? ' on' : '') +
     '" onclick="irProducto(\'' + p.id + '\')"><span class="ic">◆</span>' + esc(p.nombre) +
     '<span class="count">' + ptTareas(p.id).filter((t) => t.estado === 'libre').length + '</span></button>';
-  const arch = DB.producto.filter((p) => p.archivado);
+  const nPap = DB.producto.filter((p) => p.archivado).length;
   return '<div class="grp-label">Productos</div>' +
     ptActivos().map(item).join('') +
     '<button class="nav-item" onclick="formProducto()"><span class="ic">＋</span>Nuevo producto</button>' +
     (CONFIG.backend === 'local' && !DB.producto.length
       ? '<button class="nav-item" onclick="ptCargarEjemplo()" title="Solo en modo local: crea un producto de muestra"><span class="ic">✦</span>Cargar ejemplo</button>' : '') +
-    (arch.length ? '<div class="grp-label">Archivados</div>' + arch.map(item).join('') : '');
+    (nPap ? '<button class="nav-item' + (vista.pantalla === 'prodpapelera' ? ' on' : '') + '" onclick="irPapeleraProductos()"><span class="ic">🗑</span>Papelera' +
+      '<span class="count">' + nPap + '</span></button>' : '');
 }
+
+function irPapeleraProductos() { vista.pantalla = 'prodpapelera'; render(); }
+
+/** Productos archivados: se ven aquí, igual que los proyectos eliminados en su Papelera. Nada se borra. */
+function renderPapeleraProductos() {
+  const hoy = hoyISO();
+  const filas = DB.producto.filter((p) => p.archivado)
+    .sort((a, b) => ((a.archivadoEn || '') < (b.archivadoEn || '') ? 1 : -1))
+    .map((p) => {
+      const n = ptTareas(p.id).filter((t) => t.estado !== 'descartada').length;
+      const d = p.archivadoEn ? dias(p.archivadoEn, hoy) : null;
+      return '<div class="act"><div class="act-cuerpo"><div class="act-tit">' + esc(p.nombre) + '</div>' +
+        '<div class="act-meta">' +
+        (d == null ? '' : '<span>Archivado ' + (d === 0 ? 'hoy' : 'hace ' + d + (d === 1 ? ' día' : ' días')) + '</span>') +
+        '<span>' + n + (n === 1 ? ' tarea' : ' tareas') + '</span></div></div>' +
+        '<button class="btn ghost" onclick="ptVerArchivado(\'' + p.id + '\')">Ver</button>' +
+        '<button class="btn ghost" onclick="ptRestaurarPorId(\'' + p.id + '\')">Restaurar</button></div>';
+    }).join('');
+  app().innerHTML = '<div class="head"><h1>Papelera de productos</h1></div>' +
+    '<div class="card"><p class="nota">Los productos archivados se quedan aquí. Nada se borra: restaurar uno lo devuelve completo, ' +
+    'con todas sus tareas y su historial. “Ver” lo abre en modo de solo lectura.</p>' +
+    (filas || '<p class="vacio">La papelera está vacía.</p>') + '</div>';
+}
+function ptVerArchivado(id) { irProducto(id); }
 
 function irProducto(id) {
   ptFiltro = { area: 'Todas', tipo: 'Todos', pri: 'Todas', dueno: 'Todos' }; ptRapida = null;
@@ -212,13 +237,13 @@ function renderProducto() {
     '<h1>' + esc(p.nombre) + '<span class="sub">Producto · ' + abiertas + ' abiertas</span></h1>' +
     (p.descripcion ? '<p class="sub-h1">' + esc(p.descripcion) + '</p>' : '') + '</div>' +
     '<div class="acciones">' + (ro ? '' : '<button class="btn" onclick="formTarea()">＋ Tarea</button>') + '</div></div>' +
-    (ro ? '<div class="nota">Este producto está archivado: se ve en modo de solo lectura. Restaurarlo lo devuelve al sidebar.</div>' : '') +
+    (ro ? '<div class="nota">Este producto está archivado: se ve en modo de solo lectura. Se restaura desde la Papelera, en el sidebar.</div>' : '') +
     (todas.length ? filtros : '') + tablero +
     '<p class="pt-pie">Sin semáforo ni reportes: este backlog no entra a los cortes de proyectos. Cada tarea lleva su avance, ' +
     'y desde “Por tomar” ya se puede asignar y planear. Las horas son una estimación opcional.' +
     (descartadas.length ? ' <button class="link" onclick="ptVerDescartadas()">Ver descartadas (' + descartadas.length + ')</button>' : '') + '</p>' +
     '<div class="pt-zona"><div><b>Administrar producto</b><span>' +
-    (ro ? 'Archivado. No se borró nada.' : 'Archivarlo lo saca del sidebar y deja su tablero de solo lectura. No se borra nada y se puede restaurar.') +
+    (ro ? 'Archivado. No se borró nada.' : 'Archivarlo lo saca del sidebar y deja su tablero de solo lectura. No se borra nada y se puede restaurar desde la Papelera.') +
     '</span></div><div class="pt-zona-btns">' + arch + '</div></div>';
   if (ptRapida) { const c = $('#ptRapidaTxt'); if (c) c.focus(); }
 }
@@ -524,17 +549,22 @@ function ptConfirmarArchivar() {
   const n = ptTareas(p.id).filter((t) => t.estado !== 'descartada' && t.estado !== 'hecho').length;
   modal('¿Archivar “' + p.nombre + '”?',
     '<p class="nota">Sale del sidebar y su tablero queda de solo lectura. Sus ' + n + ' tareas abiertas y todo el historial se conservan, ' +
-    'y puedes restaurarlo cuando quieras desde “Archivados”.</p>',
+    'y puedes restaurarlo cuando quieras desde la Papelera de productos.</p>',
     'Archivar producto', () => {
-      p.archivado = true; guardar('producto', p).catch((e) => aviso('No se pudo guardar: ' + e.message));
+      p.archivado = true; p.archivadoEn = hoyISO(); guardar('producto', p).catch((e) => aviso('No se pudo guardar: ' + e.message));
       cerrarModal(); const otro = ptActivos()[0];
       if (otro) irProducto(otro.id); else volver();
-      aviso('"' + p.nombre + '" se archivó. Está en Archivados, en el sidebar.');
+      aviso('"' + p.nombre + '" se archivó. Está en la Papelera, en el sidebar.');
     });
+}
+function ptRestaurarPorId(id) {
+  const p = ptProducto(id); if (!p) return;
+  p.archivado = false; delete p.archivadoEn; guardar('producto', p).catch((e) => aviso('No se pudo guardar: ' + e.message));
+  cerrarModal(); irProducto(p.id); aviso('"' + p.nombre + '" volvió al sidebar.');
 }
 function ptRestaurarProducto() {
   const p = ptProducto(vista.producto); if (!p) return;
-  p.archivado = false; guardar('producto', p).catch((e) => aviso('No se pudo guardar: ' + e.message));
+  p.archivado = false; delete p.archivadoEn; guardar('producto', p).catch((e) => aviso('No se pudo guardar: ' + e.message));
   render(); aviso('"' + p.nombre + '" volvió al sidebar.');
 }
 

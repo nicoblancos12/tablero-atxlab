@@ -5,6 +5,7 @@
    ══════════════════════════════════════════════════════════════════════ */
 
 const CONFIG = {
+  // backend: 'local',       // 'local' (pruebas) | 'sharepoint' (compartido)
   backend: 'sharepoint',       // 'local' (pruebas) | 'sharepoint' (compartido)
   clientId: 'e9fdfbd4-c437-466c-a4d7-057c9b2b79e7',
   tenantId: '3a5ef2b1-86c6-41bc-a30c-94709a8d0590',
@@ -89,14 +90,21 @@ async function resolverLista(tipo) {
 
 const COLUMNAS = {};   // id de lista -> { nombre visible o interno: nombre interno }
 const COLUMNAS_TXT = {};   // id de lista -> { nombre interno: definición de texto (maxLength, allowMultipleLines) }
+const COLUMNAS_INFO = {};  // id de lista -> { nombre interno: { visible, tipo } }, para explicar qué columna falla
+const COLUMNAS_MALAS = {}; // "idLista:nombreInterno" -> true: columnas que SharePoint ya rechazó en esta sesión
 async function columnasDe(listId) {
   if (!COLUMNAS[listId]) {
-    const r = await graph('/sites/' + siteId + '/lists/' + listId + '/columns?$select=name,displayName,readOnly,text&$top=200');
-    const m = {}, tx = {};
+    const r = await graph('/sites/' + siteId + '/lists/' + listId + '/columns?$select=name,displayName,readOnly,text,choice,number,dateTime,boolean,lookup,personOrGroup,calculated&$top=200');
+    const m = {}, tx = {}, info = {};
+    r.value.forEach((c) => {
+      const t = ['choice', 'number', 'dateTime', 'boolean', 'lookup', 'personOrGroup', 'calculated'].find((k) => c[k]) ||
+        (c.text ? (c.text.allowMultipleLines ? 'varias líneas' : 'texto') : 'otro');
+      info[c.name] = { visible: c.displayName || c.name, tipo: t };
+    });
     // Al importar una lista desde Excel o crearla a mano, el nombre interno puede no coincidir con el visible
     // (por ejemplo "Ref0"). Se acepta cualquiera de los dos y se escribe siempre con el interno.
     r.value.forEach((c) => { if (c.text) tx[c.name] = c.text; if (!c.readOnly) { if (c.displayName && !m[c.displayName]) m[c.displayName] = c.name; m[c.name] = c.name; } });
-    COLUMNAS[listId] = m; COLUMNAS_TXT[listId] = tx;
+    COLUMNAS[listId] = m; COLUMNAS_TXT[listId] = tx; COLUMNAS_INFO[listId] = info;
   }
   return COLUMNAS[listId];
 }
@@ -111,10 +119,15 @@ async function leerLista(tipoRef, nuevo) {
     const r = await graph(url);
     r.value.forEach((it) => {
       const f = it.fields || {};
-      const tipo = f[cTipo] || f.TipoReg || f.Tipo || f.Tipo0 || f.TipoRegistro;
-      if (!tipo || !f[cDatos]) return;
+      let tipo = f[cTipo] || f.TipoReg || f.Tipo || f.Tipo0 || f.TipoRegistro;
+      if (!f[cDatos]) return;
       try {
         const d = JSON.parse(f[cDatos]);
+        // En listProducts TipoReg es solo un espejo: si falta o no coincide, el tipo se deduce de la forma del registro.
+        if (TIPOS_PROD.indexOf(tipoRef) >= 0 && TIPOS_PROD.indexOf(tipo) < 0) {
+          tipo = d && d.producto !== undefined && d.titulo !== undefined ? 'tarea'
+            : (d && d.nombre !== undefined && d.areas !== undefined ? 'producto' : tipo);
+        }
         if (nuevo[tipo]) {
           if (nuevo[tipo].some((x) => x.id === d.id)) { console.warn('registro duplicado en la lista, se ignora:', tipo, d.id); return; }
           nuevo[tipo].push(d); SPID[d.id] = it.id;
@@ -220,17 +233,49 @@ async function guardarRemoto(tipo, obj) {
       SPID[obj.id] = r.id;
     }
   };
-  try { await enviar(fields); }
-  catch (e) {
-    // Las columnas de listProducts (Estado, Prioridad…) son un espejo para consultar; la verdad está en Datos.
-    // Si una no acepta el valor (p. ej. quedó como Choice o con otro tipo), se guarda solo lo esencial
-    // para no perder el dato, y se avisa para que se corrija la columna.
-    if (TIPOS_PROD.indexOf(tipo) < 0 || !/badArgument|not acceptable|400/.test(e.message)) throw e;
-    const reales = await columnasDe(listId), minimo = {};
-    ['Title', 'Ref', 'Datos', CONFIG.campoTipo].forEach((k) => { if (reales[k] && reales[k] in fields) minimo[reales[k]] = fields[reales[k]]; });
-    console.warn('listProducts: una columna rechazó el valor; se guardó solo lo esencial.', e.message);
-    await enviar(minimo);
-    if (!guardar._avisado) { guardar._avisado = true; aviso('Se guardó, pero alguna columna de la lista no acepta el valor. Revisa que sean de tipo texto.'); }
+  // Las columnas de listProducts (Estado, Prioridad…) son un espejo para consultar; la verdad está en Datos.
+  // Si SharePoint rechaza el valor de alguna (p. ej. quedó como lista de opciones o con otro tipo), el registro
+  // se guarda primero con lo esencial y luego se prueba cada columna por separado: las que funcionan se llenan,
+  // las que no se recuerdan para no volver a intentarlas y se avisa cuáles son, con su nombre visible y su tipo.
+  const esProd = TIPOS_PROD.indexOf(tipo) >= 0;
+  if (!esProd) return enviar(fields);
+  const reales = await columnasDe(listId), info = COLUMNAS_INFO[listId] || {};
+  const malas = (k) => COLUMNAS_MALAS[listId + ':' + k];
+  const esenciales = ['Title', 'Ref', 'Datos', CONFIG.campoTipo].map((k) => reales[k]).filter(Boolean);
+  const subconjunto = (claves) => claves.reduce((o, k) => { if (k in fields) o[k] = fields[k]; return o; }, {});
+  const opcionales = Object.keys(fields).filter((k) => esenciales.indexOf(k) < 0 && !malas(k));
+  const titulo = reales.Title || 'Title', datos = reales.Datos;
+  const intentos = [
+    subconjunto(esenciales.filter((k) => !malas(k)).concat(opcionales)),   // todo lo que se sabe que funciona
+    subconjunto(esenciales),                                               // solo lo esencial
+    subconjunto(esenciales.filter((k) => k !== reales[CONFIG.campoTipo])), // sin TipoReg
+    subconjunto([titulo, datos]),                                          // lo mínimo
+  ];
+  let ultimo = null, nivel = -1;
+  for (let i = 0; i < intentos.length; i++) {
+    if (i > 0 && JSON.stringify(Object.keys(intentos[i])) === JSON.stringify(Object.keys(intentos[i - 1]))) continue;
+    try { await enviar(intentos[i]); nivel = i; break; }
+    catch (e) { ultimo = e; if (!/badArgument|not acceptable|400/.test(e.message)) throw e; }
+  }
+  if (nivel < 0) {
+    throw new Error('SharePoint rechazó el registro incluso con solo Title y Datos. Revisa que la columna "Datos" de "' +
+      nombreListaDe(tipo) + '" sea "Varias líneas de texto" (texto sin formato). Detalle: ' + (ultimo && ultimo.message));
+  }
+  if (nivel === 0) return;   // se guardó completo
+  // El registro ya existe: se prueba cada columna que quedó fuera, una por una.
+  const rechazadas = [];
+  esenciales.filter((k) => !(k in intentos[nivel])).forEach((k) => { COLUMNAS_MALAS[listId + ':' + k] = true; rechazadas.push(k); });
+  for (const k of opcionales) {
+    try { await enviar({ [k]: fields[k] }); }
+    catch (e) { COLUMNAS_MALAS[listId + ':' + k] = true; rechazadas.push(k); }
+  }
+  if (rechazadas.length) {
+    const nombres = rechazadas.map((k) => (info[k] ? info[k].visible + ' (' + info[k].tipo + ')' : k));
+    console.warn('listProducts: columnas que SharePoint no acepta:', nombres.join(', '));
+    if (!guardar._avisado) {
+      guardar._avisado = true;
+      aviso('Se guardó, pero estas columnas de la lista no aceptan el valor: ' + nombres.join(', ') + '. Cámbialas a "Una línea de texto".');
+    }
   }
 }
 
@@ -688,6 +733,7 @@ function render() {
   if (vista.pantalla === 'midia') return renderMiDia();
   if (vista.pantalla === 'equipo') return renderEquipo();
   if (vista.pantalla === 'producto') return renderProducto();   // productos.js
+  if (vista.pantalla === 'prodpapelera') return renderPapeleraProductos();   // productos.js
   if (vista.pantalla === 'confirmar') return renderConfirmar();
   return renderProyecto();
 }
