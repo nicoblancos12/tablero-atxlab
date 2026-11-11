@@ -31,21 +31,30 @@ const ptProducto = (id) => DB.producto.find((p) => p.id === id);
 const ptTareas = (pid) => DB.tarea.filter((t) => t.producto === pid);
 const ptTarea = (id) => DB.tarea.find((t) => t.id === id);
 const ptActivos = () => DB.producto.filter((p) => !p.archivado);
-const ptYo = () => (usuario ? canon(usuario.nombre) : '');
+/** Quién soy, con el mismo criterio de Mi día: el nombre de Entra ID a veces trae un segundo apellido o un alias. */
+function ptYo() {
+  if (!usuario) return '';
+  const yo = canon(usuario.nombre), gente = personasConCarga();
+  if (gente.indexOf(yo) >= 0) return yo;
+  const corto = yo.split(' ').filter(Boolean).slice(0, 2).join(' ').toLowerCase();
+  if (!corto) return yo;
+  const parecido = gente.find((g) => { const gl = g.toLowerCase(); return gl.indexOf(corto) === 0 || corto.indexOf(gl.split(' ').slice(0, 2).join(' ')) === 0; });
+  return parecido || yo;
+}
 const ptEnCurso = (t) => t.estado === 'curso' || t.estado === 'revision';
 const ptAreasDe = (p) => (p.areas && p.areas.length ? p.areas : PT_AREAS_BASE);
 
 /** El equipo para los desplegables: las personas dadas de alta, tú y quien ya esté asignado. */
 function ptEquipo(extra) {
   const v = [];
-  DB.persona.forEach((q) => v.push(q.nombre));
-  [ptYo(), extra].forEach((n) => { if (n) v.push(n); });
+  DB.persona.forEach((q) => v.push(canon(q.nombre)));
+  [ptYo(), canon(extra)].forEach((n) => { if (n) v.push(n); });
   return v.filter((n, i) => n && v.indexOf(n) === i);
 }
 
 function ptGuardar(t, demora) {
   clearTimeout(ptTimers[t.id]);
-  const hacer = () => guardar('tarea', t).catch((e) => aviso('No se pudo guardar: ' + e.message));
+  const hacer = () => { delete ptTimers[t.id]; return guardar('tarea', t).catch((e) => aviso('No se pudo guardar: ' + e.message)); };
   if (demora) ptTimers[t.id] = setTimeout(hacer, demora); else hacer();
 }
 
@@ -142,7 +151,7 @@ function ptVisible(t) {
   if (ptFiltro.tipo !== 'Todos' && (t.tipo || 'mejora') !== ptFiltro.tipo) return false;
   if (ptFiltro.pri !== 'Todas' && t.prioridad !== ptFiltro.pri) return false;
   if (ptFiltro.dueno === '__nadie') return !t.dueno;
-  if (ptFiltro.dueno !== 'Todos' && t.dueno !== ptFiltro.dueno) return false;
+  if (ptFiltro.dueno !== 'Todos' && canon(t.dueno) !== ptFiltro.dueno) return false;
   return true;
 }
 function ptPonerFiltro(k, v) { ptFiltro[k] = v; render(); }
@@ -252,7 +261,7 @@ function ptCrearRapida(fase) {
 /* ── tarjeta ─────────────────────────────────────────────────────────── */
 function ptTarjeta(t, ro, hoy) {
   const ti = t.tipo || 'mejora';
-  const dueno = t.dueno || '';
+  const dueno = canon(t.dueno || '');
   const tarde = t.fin && t.fin < hoy && t.estado !== 'hecho';
   const fechas = t.ini || t.fin
     ? fechaCorta(t.ini || t.fin) + (t.ini && t.fin ? ' → ' + fechaCorta(t.fin) : '')
@@ -323,10 +332,11 @@ function ptSoltarCol(e, col, fase) {
   const t = ptArrastrada && ptTarea(ptArrastrada); ptArrastrada = null;
   if (!t) return;
   let msg = ptMover(t, fase);
+  const cambio = !!msg;
   if (!msg && fase === 'libre' && ptOrden === 'prioridad' && e.target.closest && e.target.closest('.pt')) {
     msg = 'Solo se reordena entre tareas del mismo nivel de prioridad. Para cambiarla, usa el lápiz.';
   }
-  if (t.estado === fase) ptGuardar(t);
+  if (cambio) ptGuardar(t);
   render(); if (msg) aviso(msg);
 }
 // Reordenar: arrastrar sobre otra tarjeta de Por tomar con la misma prioridad (mitad superior: antes; inferior: después).
@@ -361,7 +371,7 @@ const PT_OPC_PRI = Object.keys(PT_PRI).map((k) => [k, PT_PRI[k]]);
 function ptCamposToma(t) {
   const equipo = ptEquipo(t && t.dueno);
   return campo('Responsable (opcional)', '<select id="ptResp"><option value="">Sin responsable</option>' +
-      equipo.map((n) => '<option' + (t && t.dueno === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('') + '</select>') +
+      equipo.map((n) => '<option' + (t && canon(t.dueno) === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('') + '</select>') +
     '<div class="pt-fila2">' + campo('Inicio', '<input type="date" id="ptIni" value="' + esc(t && t.ini || '') + '">') +
     campo('Fin', '<input type="date" id="ptFin" value="' + esc(t && t.fin || '') + '">') + '</div>' +
     campo('Horas estimadas (opcional)', '<input type="number" id="ptHoras" min="0" step="0.5" value="' + (t && t.horas != null ? t.horas : '') + '">');

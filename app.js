@@ -72,7 +72,7 @@ async function graph(url, opts = {}) {
     ...opts,
     headers: { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json', ...(opts.headers || {}) },
   });
-  if (!r.ok) throw new Error('Graph ' + r.status + ' · ' + (await r.text()).slice(0, 200));
+  if (!r.ok) throw new Error('Graph ' + r.status + ' · ' + (await r.text()).slice(0, 700));
   return r.status === 204 ? null : r.json();
 }
 
@@ -88,14 +88,15 @@ async function resolverLista(tipo) {
 }
 
 const COLUMNAS = {};   // id de lista -> { nombre visible o interno: nombre interno }
+const COLUMNAS_TXT = {};   // id de lista -> { nombre interno: definición de texto (maxLength, allowMultipleLines) }
 async function columnasDe(listId) {
   if (!COLUMNAS[listId]) {
-    const r = await graph('/sites/' + siteId + '/lists/' + listId + '/columns?$select=name,displayName,readOnly&$top=200');
-    const m = {};
+    const r = await graph('/sites/' + siteId + '/lists/' + listId + '/columns?$select=name,displayName,readOnly,text&$top=200');
+    const m = {}, tx = {};
     // Al importar una lista desde Excel o crearla a mano, el nombre interno puede no coincidir con el visible
     // (por ejemplo "Ref0"). Se acepta cualquiera de los dos y se escribe siempre con el interno.
-    r.value.forEach((c) => { if (!c.readOnly) { if (c.displayName && !m[c.displayName]) m[c.displayName] = c.name; m[c.name] = c.name; } });
-    COLUMNAS[listId] = m;
+    r.value.forEach((c) => { if (c.text) tx[c.name] = c.text; if (!c.readOnly) { if (c.displayName && !m[c.displayName]) m[c.displayName] = c.name; m[c.name] = c.name; } });
+    COLUMNAS[listId] = m; COLUMNAS_TXT[listId] = tx;
   }
   return COLUMNAS[listId];
 }
@@ -114,7 +115,10 @@ async function leerLista(tipoRef, nuevo) {
       if (!tipo || !f[cDatos]) return;
       try {
         const d = JSON.parse(f[cDatos]);
-        if (nuevo[tipo]) { nuevo[tipo].push(d); SPID[d.id] = it.id; }
+        if (nuevo[tipo]) {
+          if (nuevo[tipo].some((x) => x.id === d.id)) { console.warn('registro duplicado en la lista, se ignora:', tipo, d.id); return; }
+          nuevo[tipo].push(d); SPID[d.id] = it.id;
+        }
       } catch (e) { console.warn('registro ilegible', it.id); }
     });
     url = r['@odata.nextLink'] || null;
@@ -154,11 +158,39 @@ function camposProductos(tipo, obj) {
   };
 }
 
-async function guardar(tipo, obj) {
+/**
+ * Guarda un registro. El cambio local es inmediato; el envío a SharePoint se
+ * encadena por registro: si dos guardados del mismo ítem salen casi juntos
+ * (crear una tarea y subirle el avance), el segundo espera al primero. Sin
+ * esto, ambos ven que el ítem aún no existe en SharePoint y lo crean dos veces.
+ */
+const COLA = {};         // id de registro -> promesa de su último guardado
+let GUARDANDO = 0;       // guardados en vuelo: el refresco automático espera a que sea 0
+function guardar(tipo, obj) {
   const lista = DB[tipo];
   const i = lista.findIndex((x) => x.id === obj.id);
   if (i >= 0) lista[i] = obj; else lista.push(obj);
-  if (CONFIG.backend === 'local') { localStorage.setItem(LKEY, JSON.stringify(DB)); return; }
+  if (CONFIG.backend === 'local') { localStorage.setItem(LKEY, JSON.stringify(DB)); return Promise.resolve(); }
+  const p = (COLA[obj.id] || Promise.resolve()).catch(() => {}).then(() => guardarRemoto(tipo, obj));
+  COLA[obj.id] = p; GUARDANDO++;
+  const fin = () => { GUARDANDO--; if (COLA[obj.id] === p) delete COLA[obj.id]; };
+  p.then(fin, fin);
+  return p;
+}
+
+/** Un 400 de Graph casi siempre es un valor que no cabe en la columna: se avisa antes de mandarlo. */
+async function validarDatos(listId, tipo, datos) {
+  let tx;
+  try { await columnasDe(listId); tx = (COLUMNAS_TXT[listId] || {}).Datos; } catch (e) { return; }
+  if (!tx) return;
+  const tope = tx.allowMultipleLines ? 0 : (tx.maxLength || 255);
+  if (tope && datos.length > tope) {
+    throw new Error('La columna "Datos" de la lista "' + nombreListaDe(tipo) + '" es de una sola línea (máximo ' + tope +
+      ' caracteres) y este registro mide ' + datos.length + '. En SharePoint cámbiala a "Varias líneas de texto" (texto sin formato).');
+  }
+}
+
+async function guardarRemoto(tipo, obj) {
   const listId = await resolverLista(tipo);
   let fields = TIPOS_PROD.indexOf(tipo) >= 0
     ? camposProductos(tipo, obj)
@@ -167,6 +199,7 @@ async function guardar(tipo, obj) {
   // y cada columna que se agregue después empieza a llenarse sola.
   fields.Title = String(fields.Title || tipo).slice(0, 200);
   fields.Ref = obj.id; fields.Datos = JSON.stringify(obj);
+  await validarDatos(listId, tipo, fields.Datos);
   fields[CONFIG.campoTipo] = tipo;
   if (TIPOS_PROD.indexOf(tipo) >= 0) {
     const reales = await columnasDe(listId);
@@ -177,17 +210,40 @@ async function guardar(tipo, obj) {
     }
     fields = Object.keys(fields).reduce((o, k) => { if (reales[k]) o[reales[k]] = fields[k]; return o; }, {});
   }
-  if (SPID[obj.id]) {
-    await graph('/sites/' + siteId + '/lists/' + listId + '/items/' + SPID[obj.id] + '/fields',
-      { method: 'PATCH', body: JSON.stringify(fields) });
-  } else {
-    const r = await graph('/sites/' + siteId + '/lists/' + listId + '/items',
-      { method: 'POST', body: JSON.stringify({ fields }) });
-    SPID[obj.id] = r.id;
+  const enviar = async (f) => {
+    if (SPID[obj.id]) {
+      await graph('/sites/' + siteId + '/lists/' + listId + '/items/' + SPID[obj.id] + '/fields',
+        { method: 'PATCH', body: JSON.stringify(f) });
+    } else {
+      const r = await graph('/sites/' + siteId + '/lists/' + listId + '/items',
+        { method: 'POST', body: JSON.stringify({ fields: f }) });
+      SPID[obj.id] = r.id;
+    }
+  };
+  try { await enviar(fields); }
+  catch (e) {
+    // Las columnas de listProducts (Estado, Prioridad…) son un espejo para consultar; la verdad está en Datos.
+    // Si una no acepta el valor (p. ej. quedó como Choice o con otro tipo), se guarda solo lo esencial
+    // para no perder el dato, y se avisa para que se corrija la columna.
+    if (TIPOS_PROD.indexOf(tipo) < 0 || !/badArgument|not acceptable|400/.test(e.message)) throw e;
+    const reales = await columnasDe(listId), minimo = {};
+    ['Title', 'Ref', 'Datos', CONFIG.campoTipo].forEach((k) => { if (reales[k] && reales[k] in fields) minimo[reales[k]] = fields[reales[k]]; });
+    console.warn('listProducts: una columna rechazó el valor; se guardó solo lo esencial.', e.message);
+    await enviar(minimo);
+    if (!guardar._avisado) { guardar._avisado = true; aviso('Se guardó, pero alguna columna de la lista no acepta el valor. Revisa que sean de tipo texto.'); }
   }
 }
 
-async function guardarVarios(pares) { for (const [t, o] of pares) await guardar(t, o); }
+async function guardarVarios(pares) {
+  for (const [t, o] of pares) {
+    try { await guardar(t, o); }
+    catch (e) {
+      // Dice cuál registro falló y cuánto pesaba su JSON: un 400 de Graph suele ser un valor que no cabe en la columna.
+      throw new Error('[' + t + ' "' + String(o.titulo || o.nombre || o.id).slice(0, 40) + '", Datos=' +
+        JSON.stringify(o).length + ' caracteres] ' + e.message);
+    }
+  }
+}
 
 async function borrar(tipo, id) {
   DB[tipo] = DB[tipo].filter((x) => x.id !== id);
@@ -1682,10 +1738,19 @@ async function crearProyecto() {
 
   aviso('Guardando ' + (actividades.length + requisitos.length + nuevas.length + 1) + ' registros...');
   try {
-    await guardarVarios([['proyecto', proyecto]]
+    const pares = [['proyecto', proyecto]]
       .concat(actividades.map((a) => ['actividad', a]))
       .concat(requisitos.map((r) => ['requisito', r]))
-      .concat(nuevas.map((q) => ['persona', q])));
+      .concat(nuevas.map((q) => ['persona', q]));
+    const hechos = [];
+    try {
+      for (const par of pares) { await guardarVarios([par]); hechos.push(par); }
+    } catch (e) {
+      // Si falla a la mitad, se deshace lo ya guardado: reintentar generaría ids nuevos y dejaría un proyecto duplicado a medias.
+      for (const [t, o] of hechos.reverse()) { try { await borrar(t, o.id); } catch (x) { /* mejor esfuerzo */ } }
+      DB.proyecto = DB.proyecto.filter((x) => x.id !== P);
+      throw new Error(e.message + ' — No se creó nada: lo que alcanzó a guardarse se deshizo, puedes reintentar.');
+    }
     borrador = null;
     aviso('Proyecto creado.');
     abrir(P);
@@ -1833,7 +1898,7 @@ function formPersona() {
 
 /** Modo local: borra lo guardado en este navegador y vuelve a sembrar. */
 async function reiniciarLocal() {
-  if (!confirm('Esto borra los proyectos guardados en este navegador y vuelve a cargar los de ejemplo. ¿Continuar?')) return;
+  if (!confirm('Esto borra los proyectos y productos guardados en este navegador y vuelve a empezar de cero. ¿Continuar?')) return;
   localStorage.removeItem(LKEY);
   await cargar();
   Object.assign(vista, { pantalla: 'general', proyecto: null, tab: 'actividades' });
@@ -1995,7 +2060,16 @@ async function iniciar() {
     pintarUsuario();
     render();
     setInterval(async () => {
-      if (vista.pantalla === 'general' || vista.pantalla === 'midia' || (vista.pantalla === 'producto' && productoLibreParaRefrescar())) { await cargar(); render(); }
+      if (GUARDANDO > 0 || Object.keys(ptTimers).some((k) => ptTimers[k])) return;   // no pisar lo que aún se está guardando
+      try {
+        if (vista.pantalla === 'general' || vista.pantalla === 'midia') { await cargar(); render(); }
+        else if (vista.pantalla === 'producto' && productoLibreParaRefrescar()) {
+          // En un producto solo se repinta si algo cambió: así no se cierra un desplegable abierto cada 30 s.
+          const antes = JSON.stringify([DB.producto, DB.tarea]);
+          await cargar();
+          if (JSON.stringify([DB.producto, DB.tarea]) !== antes && productoLibreParaRefrescar()) render();
+        }
+      } catch (e) { console.warn('No se pudo refrescar:', e.message); }
     }, CONFIG.pollSeconds * 1000);
   } catch (e) { mostrarGate('permisos', e.message); }
 }
